@@ -450,11 +450,12 @@ bool sendJogCommand(uint8_t motorId, float velocity, bool useExactLogFormat = tr
     uint32_t jogId;
     if (useExactLogFormat) {
         // Format 3: Using format that matches logs but truncated to fit 29 bits
+        // THIS IS THE FORMAT THAT WORKS!
         jogId = ((static_cast<uint32_t>(commandType) << 24) | 
                 (static_cast<uint32_t>(0x07EB) << 8) | 
                 static_cast<uint32_t>(motorId)) & 0x1FFFFFFF;
     } else {
-        // Alternative approach using RS03Motor library method
+        // Alternative approach using RS03Motor library method - not working
         uint16_t packed_torque = motor.packFloatToUint16(0.0f, T_MIN, T_MAX); // No additional torque
         jogId = ((static_cast<uint32_t>(commandType) << 24) | 
                 (static_cast<uint32_t>(packed_torque) << 8) | 
@@ -465,26 +466,32 @@ bool sendJogCommand(uint8_t motorId, float velocity, bool useExactLogFormat = tr
     uint8_t data[8] = {0};
     
     if (useExactLogFormat) {
-        // Use exact format from successful logs
+        // Use exact format from successful logs - THIS IS THE FORMAT THAT WORKS!
         data[0] = 0x05;  // Position MSB from log
         data[1] = 0x70;  // Position LSB from log
         data[2] = 0x00;  // Zero
         data[3] = 0x00;  // Zero
         data[4] = 0x07;  // Kp MSB from log
-        data[5] = velocity > 0.0f ? 0x01 : 0x00;  // Direction from log (0x01=forward, 0x00=stop)
         
-        // Velocity value - convert the float to a comparable format used in logs
+        // For direction and velocity
         if (abs(velocity) < 0.01f) {
-            // For stop (velocity near zero), use the STOP values from log
-            data[6] = 0x7F;
-            data[7] = 0xFF;
+            // For stop (velocity near zero)
+            data[5] = 0x00;  // Direction: stop
+            data[6] = 0x7F;  // Velocity MSB for stop
+            data[7] = 0xFF;  // Velocity LSB for stop
+        } else if (velocity > 0.0f) {
+            // For forward movement
+            data[5] = 0x01;  // Direction: forward
+            data[6] = 0x86;  // Velocity MSB from successful log
+            data[7] = 0x65;  // Velocity LSB from successful log
         } else {
-            // For movement, use the JOG values from log
-            data[6] = 0x86;
-            data[7] = 0x65;
+            // For reverse movement (negative velocity)
+            data[5] = 0xFF;  // Direction: reverse
+            data[6] = 0x86;  // Same velocity magnitude as forward
+            data[7] = 0x65;  // Same velocity magnitude as forward
         }
     } else {
-        // Use proper MIT mode format with floating point conversion
+        // Use proper MIT mode format with floating point conversion - not working
         uint16_t packed_pos = motor.packFloatToUint16(0.0f, P_MIN, P_MAX);
         uint16_t packed_vel = motor.packFloatToUint16(velocity, V_MIN, V_MAX);
         uint16_t packed_kp = motor.packFloatToUint16(0.0f, KP_MIN, KP_MAX);  
@@ -544,7 +551,7 @@ void loop() {
           // Show human-readable error descriptions if any errors exist
           if (feedback.error_flags != 0) {
               Serial.print(" (");
-              Serial.print(motor.getErrorText());
+              Serial.print(motor.getErrorText().c_str());
               Serial.print(")");
           }
           
@@ -566,259 +573,129 @@ void loop() {
   }
 
   if (motorFound) {
-    // Check VBUS voltage to verify motor communication
-    float vbusVoltage = 0.0f;
-    bool vbusSuccess = readVBUSVoltage(vbusVoltage);
+    static bool velocityTestInitialized = false;
+    static unsigned long testStartTime = 0;
+    static const unsigned long TEST_DURATION_MS = 20000; // 20 seconds total test
+    static const unsigned long RAMP_UP_DURATION_MS = 8000; // 8 seconds to ramp up
+    static const unsigned long HOLD_DURATION_MS = 4000; // 4 seconds at max speed
+    static const unsigned long RAMP_DOWN_DURATION_MS = 8000; // 8 seconds to ramp down
+    static float targetVelocity = 0.0f;
+    static unsigned long lastVelocityUpdateTime = 0;
+    static const unsigned long VELOCITY_UPDATE_INTERVAL_MS = 100; // Update velocity every 100ms
     
-    if (vbusSuccess) {
-      Serial.print("MOTOR COMMUNICATION VERIFIED! VBUS = ");
-      Serial.print(vbusVoltage);
-      Serial.println(" V");
-      setAllPixelsColor(0, 50, 0); // Green indicates communication verified
+    // Initialize velocity mode test
+    if (!velocityTestInitialized) {
+      Serial.println("\n--- STARTING VELOCITY MODE TEST ---");
+      setAllPixelsColor(0, 0, 50); // Blue indicates test starting
+      
+      // Reset any faults
+      Serial.println("Resetting motor faults...");
+      if (!motor.resetFaults()) {
+        Serial.println("Failed to reset faults!");
+      }
       delay(200);
-      setAllPixelsColor(0, 0, 50); // Back to blue for normal operation
-    } else {
-      Serial.println("WARNING: Could not read VBUS voltage. Motor may not be responding.");
-      setAllPixelsColor(50, 50, 0); // Yellow indicates communication issue
-      delay(500);
-    }
-
-    Serial.println("\n--- Starting Motor Test Sequence Based on Log ---");
-    setAllPixelsColor(0, 0, 50); 
-
-    Serial.println("Attempting to Reset Faults...");
-    if (!motor.resetFaults()) { 
-        Serial.println(" -> Failed to reset faults!");
-    } else {
-        Serial.println(" -> Faults reset successfully.");
-    }
-    delay(200); 
-
-    Serial.println("Attempting to Enable motor...");
-    if (!motor.enable()) { 
-        Serial.println(" -> Failed to enable motor!");
-    } else {
-        Serial.println(" -> Motor enabled successfully.");
-    }
-    delay(200);
-
-    // Set the motor to MIT mode, which is essential for Type 1 commands
-    Serial.println("Setting motor to MIT mode...");
-    if (!motor.setModeMit()) { 
-        Serial.println(" -> Failed to set MIT mode!");
-    } else {
-        Serial.println(" -> MIT mode set successfully.");
-    }
-    delay(200);
-
-    Serial.println("Attempting to Enable Active Reporting...");
-    if (!motor.setActiveReporting(true)) { 
-        Serial.println(" -> Failed to enable active reporting!");
-    } else {
-        Serial.println(" -> Active reporting enabled successfully.");
-    }
-    delay(200); 
-
-    // Simplified test sequence using our new function
-    Serial.println("\n--- TESTING JOG COMMANDS ---");
-    
-    // Test 1: Using the standalone function with log format
-    Serial.println("\n--- Test 1: Using sendJogCommand with log format ---");
-    setAllPixelsColor(50, 0, 0); // Red for test 1
-    
-    // Check for errors before moving
-    if (motor.hasErrors()) {
-        Serial.print("WARNING: Errors detected before Test 1: ");
-        Serial.println(motor.getErrorText());
+      
+      // Enable the motor
+      Serial.println("Enabling motor...");
+      if (!motor.enable()) {
+        Serial.println("Failed to enable motor!");
+      }
+      delay(200);
+      
+      // Set the motor to velocity mode
+      Serial.println("Setting motor to velocity mode...");
+      if (!motor.setModeVelocity()) {
+        Serial.println("Failed to set velocity mode!");
+      }
+      delay(200);
+      
+      // Enable active reporting
+      Serial.println("Enabling active reporting...");
+      if (!motor.setActiveReporting(true)) {
+        Serial.println("Failed to enable active reporting!");
+      }
+      delay(200);
+      
+      // Test initialization complete
+      Serial.println("Velocity mode test initialized. Beginning velocity ramp...");
+      velocityTestInitialized = true;
+      testStartTime = millis();
+      lastVelocityUpdateTime = testStartTime;
     }
     
-    Serial.println("Sending JOG FORWARD command...");
-    if (sendJogCommand(detectedMotorId, 5.0f, true)) {
-        Serial.println("JOG FORWARD sent successfully. Waiting for movement...");
-        delay(3000); // Wait longer to observe movement
+    // Run the velocity test sequence
+    if (velocityTestInitialized) {
+      unsigned long currentTime = millis();
+      unsigned long elapsedTime = currentTime - testStartTime;
+      
+      // Calculate target velocity based on test phase
+      if (elapsedTime < RAMP_UP_DURATION_MS) {
+        // Ramp up phase: 0 to 1 rad/s
+        targetVelocity = (float)elapsedTime / RAMP_UP_DURATION_MS;
+        setAllPixelsColor(0, 0, 50 + (int)(50 * targetVelocity)); // Increasing blue intensity
+      } 
+      else if (elapsedTime < (RAMP_UP_DURATION_MS + HOLD_DURATION_MS)) {
+        // Hold at max velocity phase
+        targetVelocity = 1.0f;
+        setAllPixelsColor(0, (int)(50 * targetVelocity), 50); // Green/blue mix at max speed
+      } 
+      else if (elapsedTime < (RAMP_UP_DURATION_MS + HOLD_DURATION_MS + RAMP_DOWN_DURATION_MS)) {
+        // Ramp down phase: 1 to 0 rad/s
+        unsigned long rampDownTime = elapsedTime - (RAMP_UP_DURATION_MS + HOLD_DURATION_MS);
+        targetVelocity = 1.0f - ((float)rampDownTime / RAMP_DOWN_DURATION_MS);
+        setAllPixelsColor((int)(50 * (1.0f - targetVelocity)), 0, 50); // Mix of red and blue as we slow down
+      } 
+      else {
+        // Test complete
+        targetVelocity = 0.0f;
+        setAllPixelsColor(50, 50, 50); // White indicates test complete
         
-        // Check for errors during movement
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors detected during movement: ");
-            Serial.println(motor.getErrorText());
+        // Reset the motor after test completion
+        Serial.println("\n--- VELOCITY MODE TEST COMPLETE ---");
+        Serial.println("Resetting motor...");
+        motor.setVelocity(0.0f); // Ensure velocity is zero
+        delay(100);
+        motor.disable(); // Disable the motor
+        delay(100);
+        motor.resetFaults(); // Reset any faults
+        
+        // Reset the test
+        velocityTestInitialized = false;
+        delay(5000); // Wait 5 seconds before next test cycle
+      }
+      
+      // Update the motor velocity at regular intervals
+      if (currentTime - lastVelocityUpdateTime >= VELOCITY_UPDATE_INTERVAL_MS) {
+        Serial.print("Setting velocity to ");
+        Serial.print(targetVelocity, 4);
+        Serial.print(" rad/s (");
+        Serial.print(elapsedTime / 1000.0f, 1);
+        Serial.println(" seconds elapsed)");
+        
+        if (!motor.setVelocity(targetVelocity * 20)) {
+          Serial.println("Failed to set velocity!");
         }
         
-        Serial.println("Sending STOP command...");
-        if (sendJogCommand(detectedMotorId, 0.0f, true)) {
-            Serial.println("STOP command sent successfully.");
-        }
+        lastVelocityUpdateTime = currentTime;
+      }
+      
+      // Check for errors during test
+      if (motor.hasErrors()) {
+        Serial.print("WARNING: Motor errors detected: ");
+        Serial.println(motor.getErrorText().c_str());
         
-        // Reset faults after movement test
-        Serial.println("Resetting faults after Test 1...");
-        if (motor.resetFaults()) {
-            Serial.println(" -> Faults reset successfully.");
-        } else {
-            Serial.println(" -> Failed to reset faults!");
+        // Optionally reset errors and continue
+        if (elapsedTime % 1000 < 10) { // Try to reset errors about once per second
+          motor.resetFaults();
         }
-        delay(200);
-        
-        // Check if faults were cleared
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors still present after reset: ");
-            Serial.println(motor.getErrorText());
-        }
+      }
     }
-    delay(2000); // Wait between tests
-    
-    // Test 2: Using the standalone function with MIT format
-    Serial.println("\n--- Test 2: Using sendJogCommand with MIT format ---");
-    setAllPixelsColor(0, 50, 0); // Green for test 2
-    
-    // Check for errors before moving
-    if (motor.hasErrors()) {
-        Serial.print("WARNING: Errors detected before Test 2: ");
-        Serial.println(motor.getErrorText());
-    }
-    
-    Serial.println("Sending JOG FORWARD command with MIT format...");
-    if (sendJogCommand(detectedMotorId, 5.0f, false)) {
-        Serial.println("JOG FORWARD (MIT) sent successfully. Waiting for movement...");
-        delay(3000); // Wait longer to observe movement
-        
-        // Check for errors during movement
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors detected during movement: ");
-            Serial.println(motor.getErrorText());
-        }
-        
-        Serial.println("Sending STOP command with MIT format...");
-        if (sendJogCommand(detectedMotorId, 0.0f, false)) {
-            Serial.println("STOP command (MIT) sent successfully.");
-        }
-        
-        // Reset faults after movement test
-        Serial.println("Resetting faults after Test 2...");
-        if (motor.resetFaults()) {
-            Serial.println(" -> Faults reset successfully.");
-        } else {
-            Serial.println(" -> Failed to reset faults!");
-        }
-        delay(200);
-        
-        // Check if faults were cleared
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors still present after reset: ");
-            Serial.println(motor.getErrorText());
-        }
-    }
-    delay(2000); // Wait between tests
-    
-    // Test 3: Using the new motor.jogMotor() method with log format
-    Serial.println("\n--- Test 3: Using motor.jogMotor() with log format ---");
-    setAllPixelsColor(0, 0, 50); // Blue for test 3
-    
-    // Check for errors before moving
-    if (motor.hasErrors()) {
-        Serial.print("WARNING: Errors detected before Test 3: ");
-        Serial.println(motor.getErrorText());
-    }
-    
-    Serial.println("Sending JOG FORWARD command via motor.jogMotor()...");
-    if (motor.jogMotor(5.0f, true)) {
-        Serial.println("JOG FORWARD sent successfully via motor.jogMotor(). Waiting for movement...");
-        delay(3000); // Wait longer to observe movement
-        
-        // Check for errors during movement
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors detected during movement: ");
-            Serial.println(motor.getErrorText());
-        }
-        
-        Serial.println("Sending STOP command via motor.jogMotor()...");
-        if (motor.jogMotor(0.0f, true)) {
-            Serial.println("STOP command sent successfully via motor.jogMotor().");
-        }
-        
-        // Reset faults after movement test
-        Serial.println("Resetting faults after Test 3...");
-        if (motor.resetFaults()) {
-            Serial.println(" -> Faults reset successfully.");
-        } else {
-            Serial.println(" -> Failed to reset faults!");
-        }
-        delay(200);
-        
-        // Check if faults were cleared
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors still present after reset: ");
-            Serial.println(motor.getErrorText());
-        }
-    }
-    delay(2000); // Wait between tests
-    
-    // Test 4: Using the new motor.jogMotor() method with MIT format
-    Serial.println("\n--- Test 4: Using motor.jogMotor() with MIT format ---");
-    setAllPixelsColor(50, 50, 0); // Yellow for test 4
-    
-    // Check for errors before moving
-    if (motor.hasErrors()) {
-        Serial.print("WARNING: Errors detected before Test 4: ");
-        Serial.println(motor.getErrorText());
-    }
-    
-    Serial.println("Sending JOG REVERSE command via motor.jogMotor()...");
-    if (motor.jogMotor(-5.0f, false)) {
-        Serial.println("JOG REVERSE sent successfully via motor.jogMotor(). Waiting for movement...");
-        delay(3000); // Wait longer to observe movement
-        
-        // Check for errors during movement
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors detected during movement: ");
-            Serial.println(motor.getErrorText());
-        }
-        
-        Serial.println("Sending STOP command via motor.jogMotor()...");
-        if (motor.jogMotor(0.0f, false)) {
-            Serial.println("STOP command sent successfully via motor.jogMotor().");
-        }
-        
-        // Reset faults after movement test
-        Serial.println("Resetting faults after Test 4...");
-        if (motor.resetFaults()) {
-            Serial.println(" -> Faults reset successfully.");
-        } else {
-            Serial.println(" -> Failed to reset faults!");
-        }
-        delay(200);
-        
-        // Check if faults were cleared
-        if (motor.hasErrors()) {
-            Serial.print("WARNING: Errors still present after reset: ");
-            Serial.println(motor.getErrorText());
-        }
-    }
-    
-    // Final fault reset and re-enable at the end of all tests
-    Serial.println("Final fault reset and re-enable after all tests...");
-    
-    if (motor.resetFaults()) {
-        Serial.println(" -> Final faults reset successfully.");
-    } else {
-        Serial.println(" -> Failed to reset faults in final reset!");
-    }
-    delay(200);
-    
-    if (motor.enable()) {
-        Serial.println(" -> Final motor enable successful.");
-    } else {
-        Serial.println(" -> Failed to enable motor in final enable!");
-    }
-    delay(200);
-    
-    Serial.println("--- Motor Test Sequence Complete. Restarting in 10 seconds --- ");
-    setAllPixelsColor(50, 50, 50); // White indicates test complete
-    delay(10000); // Longer delay before repeating tests
-    
   } else {
     delay(1000); 
-    setAllPixelsColor(50, 0, 0);
+    setAllPixelsColor(50, 0, 0); // Red if motor not found
   }
-  delay(1); 
+  
+  delay(1); // Small delay for loop stability
 }
 
 // Helper function to set all pixels to the same color

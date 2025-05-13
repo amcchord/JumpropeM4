@@ -3,6 +3,7 @@
 #include <cmath>   // For std::isnan, std::isinf, round. Not for clamp.
 #include <cstring> // For memcpy
 #include <algorithm> // For std::min and std::max, if available and used instead of manual clamp
+#include <string>
 
 // Helper function for printing frames
 void print_frame_details(const char* label, const CanFrame& frame) {
@@ -373,7 +374,7 @@ bool RS03Motor::jogMotor(float velocity_rad_s, bool useLogFormat) {
     uint32_t jogId;
     
     if (useLogFormat) {
-        // Use similar ID format as seen in logs
+        // Use similar ID format as seen in logs - this is what works!
         jogId = ((static_cast<uint32_t>(commandType) << 24) | 
                 (static_cast<uint32_t>(0x07EB) << 8) | 
                 static_cast<uint32_t>(motor_id_)) & 0x1FFFFFFF;
@@ -388,38 +389,32 @@ bool RS03Motor::jogMotor(float velocity_rad_s, bool useLogFormat) {
     uint8_t data[8] = {0};
     
     if (useLogFormat) {
-        // Using exact format that worked in logs
+        // Using exact format that worked in logs for Test 1
         data[0] = 0x05;  // Position MSB from log
         data[1] = 0x70;  // Position LSB from log
         data[2] = 0x00;  // Zero values from log
         data[3] = 0x00;  // Zero values from log
         data[4] = 0x07;  // Kp MSB from log
         
-        // For direction (data[5]), 0x01 was used for forward, 0x00 for stop
-        data[5] = abs(velocity_rad_s) < 0.01f ? 0x00 : (velocity_rad_s > 0.0f ? 0x01 : 0xFF);
-        
-        // For velocity (data[6-7]), log used specific values
+        // For direction (data[5]), 0x01 was used for forward, 0x00 for stop, use 0xFF for backward
         if (abs(velocity_rad_s) < 0.01f) {
             // Stop command
-            data[6] = 0x7F;
-            data[7] = 0xFF;
+            data[5] = 0x00;  // Direction: stop
+            data[6] = 0x7F;  // Velocity MSB for stop
+            data[7] = 0xFF;  // Velocity LSB for stop
         } else if (velocity_rad_s > 0.0f) {
-            // Forward command (using original log values)
-            data[6] = 0x86;
-            data[7] = 0x65;
+            // Forward command (using original log values that worked)
+            data[5] = 0x01;  // Direction: forward
+            data[6] = 0x86;  // Velocity MSB for forward
+            data[7] = 0x65;  // Velocity LSB for forward
         } else {
             // Reverse command (modified from forward)
-            data[6] = 0x86;
-            data[7] = 0x65;
+            data[5] = 0xFF;  // Direction: backward (using 0xFF as the negative indicator)
+            data[6] = 0x86;  // Use same velocity magnitude as forward
+            data[7] = 0x65;  // Use same velocity magnitude as forward
         }
     } else {
-        // Using proper MIT mode format with zero position
-        // This follows the proper protocol where:
-        // Bytes 0-1: Target position (16-bit)
-        // Bytes 2-3: Target velocity (16-bit)
-        // Bytes 4-5: Kp (16-bit)
-        // Bytes 6-7: Kd (16-bit)
-        
+        // Using MIT mode format - this wasn't working, but keeping for reference
         uint16_t packed_pos = packFloatToUint16(0.0f, P_MIN, P_MAX);
         uint16_t packed_vel = packFloatToUint16(velocity_rad_s, V_MIN, V_MAX);
         uint16_t packed_kp = packFloatToUint16(5.0f, KP_MIN, KP_MAX);  // Small Kp for basic jogging
@@ -465,8 +460,8 @@ bool RS03Motor::jogMotor(float velocity_rad_s, bool useLogFormat) {
 }
 
 // Implementation of the new error handling functions
-String RS03Motor::getErrorText() const {
-    String errorText = "";
+std::string RS03Motor::getErrorText() const {
+    std::string errorText = "";
     
     if (last_feedback_.error_flags == 0) {
         return "No errors";
@@ -493,7 +488,7 @@ String RS03Motor::getErrorText() const {
     
     // Remove trailing comma and space if any
     if (errorText.length() > 2) {
-        errorText = errorText.substring(0, errorText.length() - 2);
+        errorText = errorText.substr(0, errorText.length() - 2);
     }
     
     return errorText;
