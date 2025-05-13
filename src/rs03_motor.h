@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <string>
+#include <Arduino.h> // Include Arduino.h for the String type
 
 // Constants from the manual
 constexpr float P_MIN = -12.57f; // rad
@@ -17,6 +19,14 @@ constexpr float T_MIN = -60.0f; // Nm
 constexpr float T_MAX = 60.0f; // Nm
 constexpr float I_MIN = -43.0f; // A
 constexpr float I_MAX = 43.0f; // A
+
+// Error flag bits
+constexpr uint16_t ERROR_UNCALIBRATED = 0x20;    // bit 21: uncalibrated
+constexpr uint16_t ERROR_GRIDLOCK = 0x10;        // bit 20: Gridlock overload fault
+constexpr uint16_t ERROR_MAGNETIC = 0x08;        // bit 19: magnetic coding fault
+constexpr uint16_t ERROR_OVERTEMP = 0x04;        // bit 18: overtemperature
+constexpr uint16_t ERROR_OVERCURRENT = 0x02;     // bit 17: overcurrent
+constexpr uint16_t ERROR_UNDERVOLTAGE = 0x01;    // bit 16: undervoltage fault
 
 // Parameter indices (subset)
 constexpr uint16_t INDEX_RUN_MODE = 0x7005;
@@ -116,6 +126,13 @@ public:
 
     // Make packing utility public for use in main if needed
     uint16_t packFloatToUint16(float x, float x_min, float x_max);
+
+    // Add a specific method for jogging the motor at a given velocity
+    bool jogMotor(float velocity_rad_s, bool useLogFormat = false);
+    
+    // Get text descriptions of current error flags
+    std::string getErrorText() const;
+    bool hasErrors() const;
 
 private:
     CanInterface& can_;

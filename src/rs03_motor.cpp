@@ -362,5 +362,146 @@ bool RS03Motor::sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes
     return can_.sendFrame(frame);
 }
 
+// Implementation of the new jogMotor method
+bool RS03Motor::jogMotor(float velocity_rad_s, bool useLogFormat) {
+    Serial.print("RS03Motor::jogMotor called with velocity=");
+    Serial.print(velocity_rad_s);
+    Serial.print(", using ");
+    Serial.println(useLogFormat ? "log format" : "MIT format");
+
+    uint8_t commandType = 0x01; // MIT control mode command (Type 1)
+    uint32_t jogId;
+    
+    if (useLogFormat) {
+        // Use similar ID format as seen in logs
+        jogId = ((static_cast<uint32_t>(commandType) << 24) | 
+                (static_cast<uint32_t>(0x07EB) << 8) | 
+                static_cast<uint32_t>(motor_id_)) & 0x1FFFFFFF;
+    } else {
+        // Use proper Type 1 format with torque in data field 2
+        uint16_t packed_torque = packFloatToUint16(0.0f, T_MIN, T_MAX); // No additional torque
+        jogId = ((static_cast<uint32_t>(commandType) << 24) | 
+                (static_cast<uint32_t>(packed_torque) << 8) | 
+                static_cast<uint32_t>(motor_id_)) & 0x1FFFFFFF;
+    }
+    
+    uint8_t data[8] = {0};
+    
+    if (useLogFormat) {
+        // Using exact format that worked in logs
+        data[0] = 0x05;  // Position MSB from log
+        data[1] = 0x70;  // Position LSB from log
+        data[2] = 0x00;  // Zero values from log
+        data[3] = 0x00;  // Zero values from log
+        data[4] = 0x07;  // Kp MSB from log
+        
+        // For direction (data[5]), 0x01 was used for forward, 0x00 for stop
+        data[5] = abs(velocity_rad_s) < 0.01f ? 0x00 : (velocity_rad_s > 0.0f ? 0x01 : 0xFF);
+        
+        // For velocity (data[6-7]), log used specific values
+        if (abs(velocity_rad_s) < 0.01f) {
+            // Stop command
+            data[6] = 0x7F;
+            data[7] = 0xFF;
+        } else if (velocity_rad_s > 0.0f) {
+            // Forward command (using original log values)
+            data[6] = 0x86;
+            data[7] = 0x65;
+        } else {
+            // Reverse command (modified from forward)
+            data[6] = 0x86;
+            data[7] = 0x65;
+        }
+    } else {
+        // Using proper MIT mode format with zero position
+        // This follows the proper protocol where:
+        // Bytes 0-1: Target position (16-bit)
+        // Bytes 2-3: Target velocity (16-bit)
+        // Bytes 4-5: Kp (16-bit)
+        // Bytes 6-7: Kd (16-bit)
+        
+        uint16_t packed_pos = packFloatToUint16(0.0f, P_MIN, P_MAX);
+        uint16_t packed_vel = packFloatToUint16(velocity_rad_s, V_MIN, V_MAX);
+        uint16_t packed_kp = packFloatToUint16(5.0f, KP_MIN, KP_MAX);  // Small Kp for basic jogging
+        uint16_t packed_kd = packFloatToUint16(0.1f, KD_MIN, KD_MAX);  // Small Kd for stability
+        
+        // Position (Big Endian according to manual)
+        data[0] = (packed_pos >> 8) & 0xFF;  // MSB
+        data[1] = packed_pos & 0xFF;         // LSB
+        
+        // Velocity (Big Endian according to manual)
+        data[2] = (packed_vel >> 8) & 0xFF;  // MSB
+        data[3] = packed_vel & 0xFF;         // LSB
+        
+        // Kp (Big Endian according to manual)
+        data[4] = (packed_kp >> 8) & 0xFF;   // MSB
+        data[5] = packed_kp & 0xFF;          // LSB
+        
+        // Kd (Big Endian according to manual)
+        data[6] = (packed_kd >> 8) & 0xFF;   // MSB
+        data[7] = packed_kd & 0xFF;          // LSB
+    }
+    
+    // Print data for debugging
+    Serial.print("JOG motor command - ID: 0x");
+    Serial.print(jogId, HEX);
+    Serial.print(", Data: ");
+    for (int i = 0; i < 8; i++) {
+        if (data[i] < 0x10) Serial.print("0");
+        Serial.print(data[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+    
+    // Create and send the CAN frame
+    CanFrame frame;
+    frame.id = jogId;
+    frame.dlc = 8;
+    frame.is_extended = true;
+    memcpy(frame.data, data, 8);
+    
+    print_frame_details("RS03Motor::jogMotor SEND:", frame);
+    return can_.sendFrame(frame);
+}
+
+// Implementation of the new error handling functions
+String RS03Motor::getErrorText() const {
+    String errorText = "";
+    
+    if (last_feedback_.error_flags == 0) {
+        return "No errors";
+    }
+    
+    if (last_feedback_.error_flags & ERROR_UNCALIBRATED) {
+        errorText += "Uncalibrated, ";
+    }
+    if (last_feedback_.error_flags & ERROR_GRIDLOCK) {
+        errorText += "Gridlock overload, ";
+    }
+    if (last_feedback_.error_flags & ERROR_MAGNETIC) {
+        errorText += "Magnetic coding fault, ";
+    }
+    if (last_feedback_.error_flags & ERROR_OVERTEMP) {
+        errorText += "Overtemperature, ";
+    }
+    if (last_feedback_.error_flags & ERROR_OVERCURRENT) {
+        errorText += "Overcurrent, ";
+    }
+    if (last_feedback_.error_flags & ERROR_UNDERVOLTAGE) {
+        errorText += "Undervoltage, ";
+    }
+    
+    // Remove trailing comma and space if any
+    if (errorText.length() > 2) {
+        errorText = errorText.substring(0, errorText.length() - 2);
+    }
+    
+    return errorText;
+}
+
+bool RS03Motor::hasErrors() const {
+    return last_feedback_.error_flags != 0;
+}
+
 // Private helper methods
 // ... existing code ... 

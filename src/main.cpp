@@ -439,6 +439,95 @@ bool readVBUSVoltage(float &voltage) {
     return success;
 }
 
+// Add this new function after readVBUSVoltage() and before loop()
+bool sendJogCommand(uint8_t motorId, float velocity, bool useExactLogFormat = true) {
+    Serial.print("Sending JOG command with velocity: ");
+    Serial.println(velocity);
+    
+    uint8_t commandType = 0x01; // MIT control mode command
+    
+    // Create a properly formatted command similar to those that worked in the logs
+    uint32_t jogId;
+    if (useExactLogFormat) {
+        // Format 3: Using format that matches logs but truncated to fit 29 bits
+        jogId = ((static_cast<uint32_t>(commandType) << 24) | 
+                (static_cast<uint32_t>(0x07EB) << 8) | 
+                static_cast<uint32_t>(motorId)) & 0x1FFFFFFF;
+    } else {
+        // Alternative approach using RS03Motor library method
+        uint16_t packed_torque = motor.packFloatToUint16(0.0f, T_MIN, T_MAX); // No additional torque
+        jogId = ((static_cast<uint32_t>(commandType) << 24) | 
+                (static_cast<uint32_t>(packed_torque) << 8) | 
+                static_cast<uint32_t>(motorId)) & 0x1FFFFFFF;
+    }
+    
+    // Prepare data payload according to MIT mode format
+    uint8_t data[8] = {0};
+    
+    if (useExactLogFormat) {
+        // Use exact format from successful logs
+        data[0] = 0x05;  // Position MSB from log
+        data[1] = 0x70;  // Position LSB from log
+        data[2] = 0x00;  // Zero
+        data[3] = 0x00;  // Zero
+        data[4] = 0x07;  // Kp MSB from log
+        data[5] = velocity > 0.0f ? 0x01 : 0x00;  // Direction from log (0x01=forward, 0x00=stop)
+        
+        // Velocity value - convert the float to a comparable format used in logs
+        if (abs(velocity) < 0.01f) {
+            // For stop (velocity near zero), use the STOP values from log
+            data[6] = 0x7F;
+            data[7] = 0xFF;
+        } else {
+            // For movement, use the JOG values from log
+            data[6] = 0x86;
+            data[7] = 0x65;
+        }
+    } else {
+        // Use proper MIT mode format with floating point conversion
+        uint16_t packed_pos = motor.packFloatToUint16(0.0f, P_MIN, P_MAX);
+        uint16_t packed_vel = motor.packFloatToUint16(velocity, V_MIN, V_MAX);
+        uint16_t packed_kp = motor.packFloatToUint16(0.0f, KP_MIN, KP_MAX);  
+        uint16_t packed_kd = motor.packFloatToUint16(0.0f, KD_MIN, KD_MAX);
+        
+        // Properly format according to MIT protocol
+        data[0] = (packed_pos >> 8) & 0xFF;  // Position MSB
+        data[1] = packed_pos & 0xFF;         // Position LSB
+        data[2] = (packed_vel >> 8) & 0xFF;  // Velocity MSB
+        data[3] = packed_vel & 0xFF;         // Velocity LSB
+        data[4] = (packed_kp >> 8) & 0xFF;   // Kp MSB
+        data[5] = packed_kp & 0xFF;          // Kp LSB
+        data[6] = (packed_kd >> 8) & 0xFF;   // Kd MSB
+        data[7] = packed_kd & 0xFF;          // Kd LSB
+    }
+    
+    // Print command details
+    Serial.print("JOG Command - ID: 0x");
+    Serial.print(jogId, HEX);
+    Serial.print(", Data: ");
+    for (int i = 0; i < 8; i++) {
+        if (data[i] < 0x10) Serial.print("0");
+        Serial.print(data[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+    
+    // Send the command
+    if (CAN.beginExtendedPacket(jogId)) {
+        CAN.write(data, 8);
+        if (CAN.endPacket()) {
+            Serial.println("JOG command sent successfully!");
+            return true;
+        } else {
+            Serial.println("Failed to end JOG packet!");
+        }
+    } else {
+        Serial.println("Failed to begin JOG packet!");
+    }
+    
+    return false;
+}
+
 void loop() {
   // Check for received CAN messages
   CanFrame receivedFrame;
@@ -451,11 +540,25 @@ void loop() {
           Serial.print("FB: ID="); Serial.print(static_cast<int>(feedback.motor_id));
           Serial.print(" M="); Serial.print(feedback.mode); // 0:Reset, 1:Cali, 2:Run
           Serial.print(" E=0x"); Serial.print(feedback.error_flags, HEX);
+          
+          // Show human-readable error descriptions if any errors exist
+          if (feedback.error_flags != 0) {
+              Serial.print(" (");
+              Serial.print(motor.getErrorText());
+              Serial.print(")");
+          }
+          
           Serial.print(" Pos="); Serial.print(feedback.position, 4);
           Serial.print(" Vel="); Serial.print(feedback.velocity, 4);
           Serial.print(" Torq="); Serial.print(feedback.torque, 4);
           Serial.print(" Temp="); Serial.println(feedback.temperature, 1);
-          setAllPixelsColor(0, 20, 0);
+          
+          // Show NeoPixel based on error status
+          if (feedback.error_flags != 0) {
+              setAllPixelsColor(50, 0, 0); // Red for errors
+          } else {
+              setAllPixelsColor(0, 20, 0); // Green for normal feedback
+          }
           delay(50); 
       } else {
           Serial.println("  -> Frame ignored by motor handler."); 
@@ -484,385 +587,232 @@ void loop() {
     setAllPixelsColor(0, 0, 50); 
 
     Serial.println("Attempting to Reset Faults...");
-    if (!motor.resetFaults()) { Serial.println(" -> Failed!"); }
+    if (!motor.resetFaults()) { 
+        Serial.println(" -> Failed to reset faults!");
+    } else {
+        Serial.println(" -> Faults reset successfully.");
+    }
     delay(200); 
 
     Serial.println("Attempting to Enable motor...");
-    if (!motor.enable()) { Serial.println(" -> Failed!"); }
+    if (!motor.enable()) { 
+        Serial.println(" -> Failed to enable motor!");
+    } else {
+        Serial.println(" -> Motor enabled successfully.");
+    }
     delay(200);
 
     // Set the motor to MIT mode, which is essential for Type 1 commands
     Serial.println("Setting motor to MIT mode...");
-    if (!motor.setModeMit()) { Serial.println(" -> Failed to set MIT mode!"); }
+    if (!motor.setModeMit()) { 
+        Serial.println(" -> Failed to set MIT mode!");
+    } else {
+        Serial.println(" -> MIT mode set successfully.");
+    }
     delay(200);
 
     Serial.println("Attempting to Enable Active Reporting...");
-    if (!motor.setActiveReporting(true)) { Serial.println(" -> Failed!"); }
+    if (!motor.setActiveReporting(true)) { 
+        Serial.println(" -> Failed to enable active reporting!");
+    } else {
+        Serial.println(" -> Active reporting enabled successfully.");
+    }
     delay(200); 
 
-    // Add the missing initialization commands from the test tool transcript
-    Serial.println("Sending command 129: Query/Ping command...");
-    uint32_t cmdId129 = ((0x00) << 24) | (0x07EB << 8) | 0xFC; // Type 0, Data area 0x07EB, Motor ID 0xFC
-    uint8_t data129[] = {0x00};
+    // Simplified test sequence using our new function
+    Serial.println("\n--- TESTING JOG COMMANDS ---");
     
-    Serial.print("CMD 129 Raw Values - ID: 0x");
-    Serial.print(cmdId129, HEX);
-    Serial.print(" (Masked to 29-bit: 0x");
-    Serial.print(cmdId129 & 0x1FFFFFFF, HEX);
-    Serial.print("), Data[");
-    Serial.print(sizeof(data129));
-    Serial.print("]: ");
-    for (size_t i = 0; i < sizeof(data129); i++) {
-        Serial.print("0x");
-        if (data129[i] < 0x10) Serial.print("0");
-        Serial.print(data129[i], HEX);
-        Serial.print(" ");
+    // Test 1: Using the standalone function with log format
+    Serial.println("\n--- Test 1: Using sendJogCommand with log format ---");
+    setAllPixelsColor(50, 0, 0); // Red for test 1
+    
+    // Check for errors before moving
+    if (motor.hasErrors()) {
+        Serial.print("WARNING: Errors detected before Test 1: ");
+        Serial.println(motor.getErrorText());
     }
-    Serial.println();
     
-    if (CAN.beginExtendedPacket(cmdId129 & 0x1FFFFFFF)) {
-        CAN.write(data129, 1);
-        if (CAN.endPacket()) {
-            Serial.println("Command 129 sent successfully!");
-        } else {
-            Serial.println("Failed to send command 129!");
+    Serial.println("Sending JOG FORWARD command...");
+    if (sendJogCommand(detectedMotorId, 5.0f, true)) {
+        Serial.println("JOG FORWARD sent successfully. Waiting for movement...");
+        delay(3000); // Wait longer to observe movement
+        
+        // Check for errors during movement
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors detected during movement: ");
+            Serial.println(motor.getErrorText());
         }
+        
+        Serial.println("Sending STOP command...");
+        if (sendJogCommand(detectedMotorId, 0.0f, true)) {
+            Serial.println("STOP command sent successfully.");
+        }
+        
+        // Reset faults after movement test
+        Serial.println("Resetting faults after Test 1...");
+        if (motor.resetFaults()) {
+            Serial.println(" -> Faults reset successfully.");
+        } else {
+            Serial.println(" -> Failed to reset faults!");
+        }
+        delay(200);
+        
+        // Check if faults were cleared
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors still present after reset: ");
+            Serial.println(motor.getErrorText());
+        }
+    }
+    delay(2000); // Wait between tests
+    
+    // Test 2: Using the standalone function with MIT format
+    Serial.println("\n--- Test 2: Using sendJogCommand with MIT format ---");
+    setAllPixelsColor(0, 50, 0); // Green for test 2
+    
+    // Check for errors before moving
+    if (motor.hasErrors()) {
+        Serial.print("WARNING: Errors detected before Test 2: ");
+        Serial.println(motor.getErrorText());
+    }
+    
+    Serial.println("Sending JOG FORWARD command with MIT format...");
+    if (sendJogCommand(detectedMotorId, 5.0f, false)) {
+        Serial.println("JOG FORWARD (MIT) sent successfully. Waiting for movement...");
+        delay(3000); // Wait longer to observe movement
+        
+        // Check for errors during movement
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors detected during movement: ");
+            Serial.println(motor.getErrorText());
+        }
+        
+        Serial.println("Sending STOP command with MIT format...");
+        if (sendJogCommand(detectedMotorId, 0.0f, false)) {
+            Serial.println("STOP command (MIT) sent successfully.");
+        }
+        
+        // Reset faults after movement test
+        Serial.println("Resetting faults after Test 2...");
+        if (motor.resetFaults()) {
+            Serial.println(" -> Faults reset successfully.");
+        } else {
+            Serial.println(" -> Failed to reset faults!");
+        }
+        delay(200);
+        
+        // Check if faults were cleared
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors still present after reset: ");
+            Serial.println(motor.getErrorText());
+        }
+    }
+    delay(2000); // Wait between tests
+    
+    // Test 3: Using the new motor.jogMotor() method with log format
+    Serial.println("\n--- Test 3: Using motor.jogMotor() with log format ---");
+    setAllPixelsColor(0, 0, 50); // Blue for test 3
+    
+    // Check for errors before moving
+    if (motor.hasErrors()) {
+        Serial.print("WARNING: Errors detected before Test 3: ");
+        Serial.println(motor.getErrorText());
+    }
+    
+    Serial.println("Sending JOG FORWARD command via motor.jogMotor()...");
+    if (motor.jogMotor(5.0f, true)) {
+        Serial.println("JOG FORWARD sent successfully via motor.jogMotor(). Waiting for movement...");
+        delay(3000); // Wait longer to observe movement
+        
+        // Check for errors during movement
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors detected during movement: ");
+            Serial.println(motor.getErrorText());
+        }
+        
+        Serial.println("Sending STOP command via motor.jogMotor()...");
+        if (motor.jogMotor(0.0f, true)) {
+            Serial.println("STOP command sent successfully via motor.jogMotor().");
+        }
+        
+        // Reset faults after movement test
+        Serial.println("Resetting faults after Test 3...");
+        if (motor.resetFaults()) {
+            Serial.println(" -> Faults reset successfully.");
+        } else {
+            Serial.println(" -> Failed to reset faults!");
+        }
+        delay(200);
+        
+        // Check if faults were cleared
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors still present after reset: ");
+            Serial.println(motor.getErrorText());
+        }
+    }
+    delay(2000); // Wait between tests
+    
+    // Test 4: Using the new motor.jogMotor() method with MIT format
+    Serial.println("\n--- Test 4: Using motor.jogMotor() with MIT format ---");
+    setAllPixelsColor(50, 50, 0); // Yellow for test 4
+    
+    // Check for errors before moving
+    if (motor.hasErrors()) {
+        Serial.print("WARNING: Errors detected before Test 4: ");
+        Serial.println(motor.getErrorText());
+    }
+    
+    Serial.println("Sending JOG REVERSE command via motor.jogMotor()...");
+    if (motor.jogMotor(-5.0f, false)) {
+        Serial.println("JOG REVERSE sent successfully via motor.jogMotor(). Waiting for movement...");
+        delay(3000); // Wait longer to observe movement
+        
+        // Check for errors during movement
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors detected during movement: ");
+            Serial.println(motor.getErrorText());
+        }
+        
+        Serial.println("Sending STOP command via motor.jogMotor()...");
+        if (motor.jogMotor(0.0f, false)) {
+            Serial.println("STOP command sent successfully via motor.jogMotor().");
+        }
+        
+        // Reset faults after movement test
+        Serial.println("Resetting faults after Test 4...");
+        if (motor.resetFaults()) {
+            Serial.println(" -> Faults reset successfully.");
+        } else {
+            Serial.println(" -> Failed to reset faults!");
+        }
+        delay(200);
+        
+        // Check if faults were cleared
+        if (motor.hasErrors()) {
+            Serial.print("WARNING: Errors still present after reset: ");
+            Serial.println(motor.getErrorText());
+        }
+    }
+    
+    // Final fault reset and re-enable at the end of all tests
+    Serial.println("Final fault reset and re-enable after all tests...");
+    
+    if (motor.resetFaults()) {
+        Serial.println(" -> Final faults reset successfully.");
     } else {
-        Serial.println("Failed to begin command 129!");
+        Serial.println(" -> Failed to reset faults in final reset!");
     }
-    delay(100);
+    delay(200);
     
-    Serial.println("Sending command 130: Parameter set command...");
-    uint32_t cmdId130 = ((0x20) << 24) | (0x07EB << 8) | 0xFC; // Type 0x20, Data area 0x07EB, Motor ID 0xFC
-    uint8_t data130[] = {0x00, 0xC4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    
-    Serial.print("CMD 130 Raw Values - ID: 0x");
-    Serial.print(cmdId130, HEX);
-    Serial.print(" (Masked to 29-bit: 0x");
-    Serial.print(cmdId130 & 0x1FFFFFFF, HEX);
-    Serial.print("), Data[");
-    Serial.print(sizeof(data130));
-    Serial.print("]: ");
-    for (size_t i = 0; i < sizeof(data130); i++) {
-        Serial.print("0x");
-        if (data130[i] < 0x10) Serial.print("0");
-        Serial.print(data130[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-    
-    if (CAN.beginExtendedPacket(cmdId130 & 0x1FFFFFFF)) {
-        CAN.write(data130, 8);
-        if (CAN.endPacket()) {
-            Serial.println("Command 130 sent successfully!");
-        } else {
-            Serial.println("Failed to send command 130!");
-        }
+    if (motor.enable()) {
+        Serial.println(" -> Final motor enable successful.");
     } else {
-        Serial.println("Failed to begin command 130!");
+        Serial.println(" -> Failed to enable motor in final enable!");
     }
-    delay(100);
+    delay(200);
     
-    Serial.println("Sending command 131: Second query command...");
-    uint32_t cmdId131 = ((0x00) << 24) | (0x07E8 << 8) | 0x44; // Type 0, Data area 0x07E8, ID 0x44
-    uint8_t data131[] = {0x00};
-    
-    Serial.print("CMD 131 Raw Values - ID: 0x");
-    Serial.print(cmdId131, HEX);
-    Serial.print(" (Masked to 29-bit: 0x");
-    Serial.print(cmdId131 & 0x1FFFFFFF, HEX);
-    Serial.print("), Data[");
-    Serial.print(sizeof(data131));
-    Serial.print("]: ");
-    for (size_t i = 0; i < sizeof(data131); i++) {
-        Serial.print("0x");
-        if (data131[i] < 0x10) Serial.print("0");
-        Serial.print(data131[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-    
-    if (CAN.beginExtendedPacket(cmdId131 & 0x1FFFFFFF)) {
-        CAN.write(data131, 1);
-        if (CAN.endPacket()) {
-            Serial.println("Command 131 sent successfully!");
-        } else {
-            Serial.println("Failed to send command 131!");
-        }
-    } else {
-        Serial.println("Failed to begin command 131!");
-    }
-    delay(1000); // Slightly longer delay before the JOG command
-
-    // This is based on the log entry at line 132 which seems to be the successful JOG FORWARD command
-    // The command appears to be: 41 54 90 07 eb fc 08 05 70 00 00 07 01 86 65
-    Serial.println("Sending JOG FORWARD command using EXACT log values...");
-    
-    // Lets try a few different ID formats to see which one works
-    
-    // Original format in logs: 0x9007EBFC - but won't fit in 29 bits
-    // Our previous attempt:    0x1007EB7F - using 0x10 instead of 0x90
-    
-    // Version 1: Just the lower 24 bits, 0x10 for type (fits in 29 bits)
-    uint32_t jogId1 = 0x1007EB00 | detectedMotorId;
-    // Version 2: Using 0x9 instead of 0x90 as command type
-    uint32_t jogId2 = 0x907EB00 | detectedMotorId;
-    // Version 3: Using 0x90 but truncated to fit in 29 bits (may be invalid)
-    uint32_t jogId3 = (0x90 << 20) | (0x07EB << 8) | detectedMotorId;
-    // Version 4: Using just the lower 3 bits of command type (0x0)
-    uint32_t jogId4 = (0x90 & 0x07) << 24 | (0x07EB << 8) | detectedMotorId;
-    
-    // Try with jogId3 first
-    uint32_t jogId = jogId3;
-    
-    Serial.println("Trying multiple ID variants to match log format:");
-    Serial.print("Version 1 (0x10 type): 0x"); Serial.println(jogId1, HEX);
-    Serial.print("Version 2 (0x9 type):  0x"); Serial.println(jogId2, HEX);
-    Serial.print("Version 3 (0x90 truncated): 0x"); Serial.println(jogId3, HEX);
-    Serial.print("Version 4 (0x90 & 0x07): 0x"); Serial.println(jogId4, HEX);
-    Serial.print("Using ID Version 3: 0x"); Serial.println(jogId, HEX);
-    
-    // Use exact data values from the log
-    uint8_t data_fwd[] = {
-        0x05, 0x70,  // Position from log: 05 70
-        0x00, 0x00,  // Zero values from log
-        0x07, 0x01,  // Values from log
-        0x86, 0x65   // Velocity from log: 86 65
-    };
-    
-    Serial.print("JOG Raw Values - ID: 0x");
-    Serial.print(jogId, HEX);
-    Serial.print(" (Masked to 29-bit: 0x");
-    Serial.print(jogId & 0x1FFFFFFF, HEX);
-    Serial.print("), Data[");
-    Serial.print(sizeof(data_fwd));
-    Serial.print("]: ");
-    for (size_t i = 0; i < sizeof(data_fwd); i++) {
-        Serial.print("0x");
-        if (data_fwd[i] < 0x10) Serial.print("0");
-        Serial.print(data_fwd[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-    
-    // Try each of the jogId variants
-    for (int variant = 1; variant <= 4; variant++) {
-        uint32_t currentJogId;
-        switch (variant) {
-            case 1: currentJogId = jogId1; break;
-            case 2: currentJogId = jogId2; break;
-            case 3: currentJogId = jogId3; break;
-            case 4: currentJogId = jogId4; break;
-            default: currentJogId = jogId1;
-        }
-        
-        Serial.println("\n==============================================");
-        Serial.print("TESTING JOG VARIANT ");
-        Serial.print(variant);
-        Serial.print(" of 4: 0x");
-        Serial.println(currentJogId, HEX);
-        Serial.println("==============================================");
-        
-        // Visual indication on NeoPixel
-        switch (variant) {
-            case 1: setAllPixelsColor(50, 0, 0); break;  // Red for variant 1
-            case 2: setAllPixelsColor(50, 50, 0); break; // Yellow for variant 2
-            case 3: setAllPixelsColor(0, 50, 0); break;  // Green for variant 3
-            case 4: setAllPixelsColor(0, 0, 50); break;  // Blue for variant 4
-        }
-        
-        // Try direct approach first
-        if (CAN.beginExtendedPacket(currentJogId & 0x1FFFFFFF)) {
-            CAN.write(data_fwd, 8);
-            if (CAN.endPacket()) {
-                Serial.print("JOG variant ");
-                Serial.print(variant);
-                Serial.println(" sent successfully via direct method!");
-            } else {
-                Serial.print("Failed to end JOG variant ");
-                Serial.print(variant);
-                Serial.println(" packet!");
-            }
-        } else {
-            Serial.print("Failed to begin JOG variant ");
-            Serial.print(variant);
-            Serial.println(" packet!");
-        }
-        
-        // Wait longer between variants for observation
-        Serial.println("Waiting 1 second to observe if motor moves...");
-        delay(1000); // Increased to 1 second
-
-        // Check for any feedback from the motor
-        Serial.println("Checking for motor feedback...");
-        unsigned long checkStartTime = millis();
-        bool feedbackReceived = false;
-        
-        while (millis() - checkStartTime < 500) { // Check for feedback for 500ms
-            int packetSize = CAN.parsePacket();
-            if (packetSize) {
-                uint32_t id = CAN.packetId();
-                uint8_t responseType = (id >> 24) & 0x1F;
-                
-                Serial.print("Received packet with ID: 0x");
-                Serial.print(id, HEX);
-                Serial.print(", Type: 0x");
-                Serial.println(responseType, HEX);
-                
-                // Read and print data
-                uint8_t data[8] = {0};
-                for (int i = 0; i < packetSize && i < 8; i++) {
-                    data[i] = CAN.read();
-                }
-                
-                Serial.print("Data: ");
-                for (int i = 0; i < 8; i++) {
-                    Serial.print("0x");
-                    if (data[i] < 0x10) Serial.print("0");
-                    Serial.print(data[i], HEX);
-                    Serial.print(" ");
-                }
-                Serial.println();
-                
-                feedbackReceived = true;
-            }
-            delay(1);
-        }
-        
-        if (!feedbackReceived) {
-            Serial.println("No feedback received from motor during check period.");
-        }
-        
-        // Additional delay before next variant
-        delay(1000); // Wait another second before the next variant
-    }
-    
-    setAllPixelsColor(0, 0, 50); // Back to blue for normal operation
-    Serial.println("Waiting 4 seconds for forward motion...");
-    delay(4000);
-    
-    // This is based on log entry at line 133 which appears to be the STOP command
-    // The command appears to be: 41 54 90 07 eb fc 08 05 70 00 00 07 00 7f ff
-    Serial.println("Sending STOP command using EXACT log values...");
-    
-    uint8_t data_stop[] = {
-        0x05, 0x70,  // Position from log: 05 70
-        0x00, 0x00,  // Zero values from log
-        0x07, 0x00,  // Values from log 
-        0x7F, 0xFF   // Stop velocity from log: 7F FF
-    };
-    
-    Serial.print("STOP Raw Values - Data[");
-    Serial.print(sizeof(data_stop));
-    Serial.print("]: ");
-    for (size_t i = 0; i < sizeof(data_stop); i++) {
-        Serial.print("0x");
-        if (data_stop[i] < 0x10) Serial.print("0");
-        Serial.print(data_stop[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-    
-    // Try each of the jogId variants for STOP too
-    for (int variant = 1; variant <= 4; variant++) {
-        uint32_t currentStopId;
-        switch (variant) {
-            case 1: currentStopId = jogId1; break;  // reuse the same ID variants
-            case 2: currentStopId = jogId2; break;
-            case 3: currentStopId = jogId3; break;
-            case 4: currentStopId = jogId4; break;
-            default: currentStopId = jogId1;
-        }
-        
-        // Only try the variant that worked for JOG (assuming it was successful)
-        Serial.print("Trying STOP with ID variant ");
-        Serial.print(variant);
-        Serial.print(": 0x");
-        Serial.println(currentStopId, HEX);
-        
-        // Try direct approach
-        if (CAN.beginExtendedPacket(currentStopId & 0x1FFFFFFF)) {
-            CAN.write(data_stop, 8);
-            if (CAN.endPacket()) {
-                Serial.print("STOP variant ");
-                Serial.print(variant);
-                Serial.println(" sent successfully!");
-            } else {
-                Serial.print("Failed to end STOP variant ");
-                Serial.print(variant);
-                Serial.println(" packet!");
-            }
-        } else {
-            Serial.print("Failed to begin STOP variant ");
-            Serial.print(variant);
-            Serial.println(" packet!");
-        }
-        
-        delay(500); // Short delay between variants
-    }
-    
-    Serial.println("Waiting 2 seconds after stopping...");
-    delay(2000);
-    
-    // Try another movement command based on line 134
-    // 41 54 90 07 eb fc 08 05 70 00 00 07 01 79 99
-    Serial.println("Sending another JOG command using EXACT log values...");
-    
-    uint8_t data_fwd2[] = {
-        0x05, 0x70,  // Position from log: 05 70
-        0x00, 0x00,  // Zero values from log
-        0x07, 0x01,  // Values from log
-        0x79, 0x99   // Second velocity from log: 79 99
-    };
-    
-    Serial.println("Trying sendRawFrame for second JOG command...");
-    if (!motor.sendRawFrame(jogId, 8, data_fwd2)) {
-        Serial.println(" -> SendRaw Failed!");
-        
-        // Try direct approach 
-        Serial.println("Trying direct CAN approach for second JOG...");
-        if (CAN.beginExtendedPacket(jogId)) {
-            CAN.write(data_fwd2, 8);
-            if (CAN.endPacket()) {
-                Serial.println("Direct second JOG transmission successful!");
-            } else {
-                Serial.println("Direct second JOG end packet failed!");
-            }
-        } else {
-            Serial.println("Direct second JOG begin packet failed!");
-        }
-    } else {
-        Serial.println("Second JOG SendRaw succeeded!");
-    }
-    
-    Serial.println("Waiting 4 seconds for second motion...");
-    delay(4000);
-    
-    // Final stop command based on line 135
-    Serial.println("Sending final STOP command...");
-    
-    Serial.println("Trying sendRawFrame for final STOP command...");
-    if (!motor.sendRawFrame(jogId, 8, data_stop)) {
-        Serial.println(" -> SendRaw Failed!");
-        
-        // Try direct approach
-        Serial.println("Trying direct CAN approach for final STOP...");
-        if (CAN.beginExtendedPacket(jogId)) {
-            CAN.write(data_stop, 8);
-            if (CAN.endPacket()) {
-                Serial.println("Direct final STOP transmission successful!");
-            } else {
-                Serial.println("Direct final STOP end packet failed!");
-            }
-        } else {
-            Serial.println("Direct final STOP begin packet failed!");
-        }
-    } else {
-        Serial.println("Final STOP SendRaw succeeded!");
-    }
-    
-    Serial.println("--- Motor Test Sequence Complete. Restarting in 5 seconds --- ");
-    delay(5000);
+    Serial.println("--- Motor Test Sequence Complete. Restarting in 10 seconds --- ");
+    setAllPixelsColor(50, 50, 50); // White indicates test complete
+    delay(10000); // Longer delay before repeating tests
     
   } else {
     delay(1000); 
