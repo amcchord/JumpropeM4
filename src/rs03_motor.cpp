@@ -1,7 +1,25 @@
 #include "rs03_motor.h"
+#include <Arduino.h> // Include for Serial object
 #include <cmath>   // For std::isnan, std::isinf, round. Not for clamp.
 #include <cstring> // For memcpy
 #include <algorithm> // For std::min and std::max, if available and used instead of manual clamp
+
+// Helper function for printing frames
+void print_frame_details(const char* label, const CanFrame& frame) {
+    // Check if Serial is available before printing
+    if (Serial) { 
+        Serial.print(label);
+        Serial.print(" ID=0x"); Serial.print(frame.id, HEX);
+        Serial.print(" DLC="); Serial.print(frame.dlc);
+        Serial.print(" Data=[");
+        for (int i = 0; i < frame.dlc; ++i) {
+            if (frame.data[i] < 0x10) Serial.print("0"); // Pad with leading zero if needed
+            Serial.print(frame.data[i], HEX);
+            if (i < frame.dlc - 1) Serial.print(" ");
+        }
+        Serial.println("]");
+    }
+}
 
 // Manual clamp implementation as std::clamp might not be available (C++17)
 namespace {
@@ -74,26 +92,27 @@ bool RS03Motor::sendFrame(const CanFrame& frame) {
 bool RS03Motor::enable() {
     // Communication Type 3: Motor Enabled to Run
     CanFrame frame = createFrame(3, master_id_, motor_id_);
-    frame.dlc = 0; // Type 3 has no data bytes according to manual example C code
+    frame.dlc = 0; // Use DLC 0 as per description
+    print_frame_details("SEND enable:", frame); // <<< PRINT
     return sendFrame(frame);
 }
 
 bool RS03Motor::disable() {
     // Communication Type 4: Motor Stops Running (Reset/Disable)
-    // Data field byte[0] = 0 (clear fault flag = false)
     CanFrame frame = createFrame(4, master_id_, motor_id_);
-    frame.dlc = 8; // Manual C code example implies DLC 8, even if only byte 0 is used
+    frame.dlc = 8;
     std::memset(frame.data, 0, sizeof(frame.data)); // Clear data field
+    print_frame_details("SEND disable:", frame); // <<< PRINT
     return sendFrame(frame);
 }
 
 bool RS03Motor::resetFaults() {
     // Communication Type 4: Motor Stops Running
-    // Data field byte[0] = 1: The fault is cleared.
     CanFrame frame = createFrame(4, master_id_, motor_id_);
-    frame.dlc = 8; // Manual C code example implies DLC 8
+    frame.dlc = 8;
     std::memset(frame.data, 0, sizeof(frame.data));
     frame.data[0] = 1; // Set clear fault flag
+    print_frame_details("SEND resetFaults:", frame); // <<< PRINT
     return sendFrame(frame);
 }
 
@@ -101,33 +120,67 @@ bool RS03Motor::resetFaults() {
 // --- Mode Setting ---
 
 bool RS03Motor::setModeVelocity() {
+    print_frame_details(" -> setModeVelocity calls:", CanFrame{}); // Indicate function call
     return setParameterUint8(INDEX_RUN_MODE, MODE_VELOCITY);
 }
 
 bool RS03Motor::setModePositionCSP(float speed_limit, float current_limit) {
+    print_frame_details(" -> setModePosCSP calls:", CanFrame{}); // Indicate function call
     bool success = true;
-    // 1. Set current limit for position mode
+    // Order matters? Manual isn't clear. Set mode last.
     success &= setParameterFloat(INDEX_LIMIT_CUR, current_limit);
-    // 2. Set speed limit for position mode (CSP)
     success &= setParameterFloat(INDEX_LIMIT_SPD, speed_limit);
-    // 3. Set run mode to Position CSP
     success &= setParameterUint8(INDEX_RUN_MODE, MODE_POS_CSP);
     return success;
+}
+
+bool RS03Motor::setModeMit() {
+    print_frame_details(" -> setModeMit calls:", CanFrame{}); // Indicate function call
+    return setParameterUint8(INDEX_RUN_MODE, MODE_MIT); // MODE_MIT is 0
 }
 
 // --- Commands (depend on current mode) ---
 
 bool RS03Motor::setVelocity(float speed_rad_s) {
-    // Uses Communication Type 18 (Single Parameter Write)
-    // Index: 0x700A (spd_ref)
+    print_frame_details(" -> setVelocity calls:", CanFrame{}); // Indicate function call
     return setParameterFloat(INDEX_SPD_REF, speed_rad_s);
 }
 
 bool RS03Motor::setPosition(float position_rad) {
-    // Uses Communication Type 18 (Single Parameter Write)
-    // Index: 0x7016 (loc_ref)
+    print_frame_details(" -> setPosition calls:", CanFrame{}); // Indicate function call
     return setParameterFloat(INDEX_LOC_REF, position_rad);
 }
+
+bool RS03Motor::setMitCommand(float position_rad, float velocity_rad_s, float kp, float kd, float torque_nm) {
+    // Communication Type 1: Operation control mode motor control instruction
+    // ID: Type (0x1) | Packed Torque (16-bit) | Target Motor ID
+    // Data: Packed Angle (16-bit), Packed Velocity (16-bit), Packed Kp (16-bit), Packed Kd (16-bit)
+
+    uint16_t packed_torque = packFloatToUint16(torque_nm, T_MIN, T_MAX);
+    CanFrame frame = createFrame(0x01, packed_torque, motor_id_); // Type 1, torque in data_field_2
+    frame.dlc = 8;
+
+    uint16_t packed_pos = packFloatToUint16(position_rad, P_MIN, P_MAX);
+    uint16_t packed_vel = packFloatToUint16(velocity_rad_s, V_MIN, V_MAX);
+    uint16_t packed_kp = packFloatToUint16(kp, KP_MIN, KP_MAX);
+    uint16_t packed_kd = packFloatToUint16(kd, KD_MIN, KD_MAX);
+
+    // Data: Byte0~1: target Angle (big endian in manual example, but usually CAN data is little endian by convention?)
+    // Manual sample code: txMsg.tx_data[0]=float_to_uint(MechPosition,P_MIN,P_MAX,16)>>8; 
+    // This indicates Big Endian for the manual's example. Let's follow that.
+    frame.data[0] = (packed_pos >> 8) & 0xFF; // Pos MSB
+    frame.data[1] = packed_pos & 0xFF;        // Pos LSB
+    frame.data[2] = (packed_vel >> 8) & 0xFF; // Vel MSB
+    frame.data[3] = packed_vel & 0xFF;        // Vel LSB
+    frame.data[4] = (packed_kp >> 8) & 0xFF;  // Kp MSB
+    frame.data[5] = packed_kp & 0xFF;         // Kp LSB
+    frame.data[6] = (packed_kd >> 8) & 0xFF;  // Kd MSB
+    frame.data[7] = packed_kd & 0xFF;         // Kd LSB
+
+    print_frame_details("SEND MIT Cmd (T1):", frame); 
+    return sendFrame(frame);
+}
+
 
 // --- Parameter Access ---
 
@@ -143,6 +196,7 @@ bool RS03Motor::setParameterFloat(uint16_t index, float value) {
     frame.data[3] = 0x00;
     // Data (Bytes 4-7, Little Endian for float)
     memcpy(&frame.data[4], &value, sizeof(float));
+    print_frame_details("  SEND setParamF:", frame); // <<< PRINT (Indented)
     return sendFrame(frame);
 }
 
@@ -158,6 +212,7 @@ bool RS03Motor::setParameterUint8(uint16_t index, uint8_t value) {
     frame.data[5] = 0x00; // Pad remaining bytes
     frame.data[6] = 0x00;
     frame.data[7] = 0x00;
+    print_frame_details("  SEND setParamU8:", frame); // <<< PRINT (Indented)
     return sendFrame(frame);
 }
 
@@ -172,6 +227,7 @@ bool RS03Motor::setParameterUint16(uint16_t index, uint16_t value) {
     memcpy(&frame.data[4], &value, sizeof(uint16_t));
     frame.data[6] = 0x00; // Pad remaining bytes
     frame.data[7] = 0x00;
+    print_frame_details("  SEND setParamU16:", frame); // <<< PRINT (Indented)
     return sendFrame(frame);
 }
 
@@ -184,6 +240,7 @@ bool RS03Motor::setParameterUint32(uint16_t index, uint32_t value) {
     frame.data[3] = 0x00;
     // Data (Bytes 4-7, Little Endian)
     memcpy(&frame.data[4], &value, sizeof(uint32_t));
+    print_frame_details("  SEND setParamU32:", frame); // <<< PRINT (Indented)
     return sendFrame(frame);
 }
 
@@ -223,14 +280,9 @@ bool RS03Motor::processFeedback(const CanFrame& frame) {
             // Note: The bit numbers (16-23) seem to apply to the *entire* 29-bit ID, not just the data_area_2 field. Let's assume they mean bits within the data_area_2 field (bits 8-23 of the full ID).
             uint16_t data_area_2 = (frame.id >> 8) & 0xFFFF;
             last_feedback_.motor_id = (data_area_2 >> 8) & 0xFF; // Should match motor_id_
-            last_feedback_.error_flags = (data_area_2 >> 0) & 0b111111; // Extract bits 16-21 (relative to start of data_area_2 at bit 8) -> bits 0-5 of data_area_2
+            last_feedback_.error_flags = (data_area_2 >> 0) & 0b111111; // Extract bits 16-21 -> bits 0-5 of data_area_2
             uint8_t mode_status_bits = (data_area_2 >> 6) & 0b11; // Extract bits 22-23 -> bits 6-7 of data_area_2
-            // Manual is ambiguous about mapping mode_status_bits to the run modes (0-5).
-            // We'll tentatively map 2 (Motor mode [Run]) to the last known sent mode,
-            // but this is unreliable without reading the run_mode parameter.
-            // If it's not 2, maybe mark mode as unknown/reset?
-            // For now, we just store the raw bits. A better approach would be to periodically read 0x7005.
-            // last_feedback_.mode = mode_status_bits; // Store raw status bits for now
+            last_feedback_.mode = mode_status_bits; // Store the raw mode status bits
 
             // Unpack data bytes
             // Byte0~1: Current Angle [0~65535] -> (-4π~4π) -> (-12.57 to 12.57) rad
@@ -261,6 +313,35 @@ RS03Motor::Feedback RS03Motor::getLastFeedback() const {
 
 void RS03Motor::setMotorId(uint8_t new_id) {
     motor_id_ = new_id;
+}
+
+bool RS03Motor::setActiveReporting(bool enable_reporting) {
+    // Communication Type 24: Motor actively reports frames
+    CanFrame frame = createFrame(0x18, master_id_, motor_id_);
+    frame.dlc = 8;
+    std::memset(frame.data, 0, sizeof(frame.data));
+    frame.data[0] = enable_reporting ? 0x01 : 0x00;
+    print_frame_details("SEND setActiveRep:", frame); // <<< PRINT
+    return sendFrame(frame);
+}
+
+bool RS03Motor::sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes, bool is_extended) {
+    CanFrame frame;
+    frame.id = id;
+    frame.dlc = dlc > 8 ? 8 : dlc; // Ensure DLC is not more than 8
+    frame.is_extended = is_extended;
+    if (data_bytes != nullptr && frame.dlc > 0) {
+        memcpy(frame.data, data_bytes, frame.dlc);
+    } else if (frame.dlc > 0) {
+        // If dlc > 0 but data_bytes is null, send zeros (or handle as error)
+        // For safety, let's ensure data is zeroed if dlc > 0 and data is null, though this case should be avoided by caller.
+        std::memset(frame.data, 0, frame.dlc);
+    } else {
+        frame.dlc = 0; // Ensure DLC is 0 if no data pointer or original dlc was 0
+    }
+
+    print_frame_details("SEND RAW FRAME:", frame); // Use existing helper
+    return can_.sendFrame(frame); 
 }
 
 // Private helper methods

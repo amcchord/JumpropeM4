@@ -76,10 +76,12 @@ public:
     bool enable();
     bool disable();
     bool resetFaults(); // Uses Type 4 with data[0] = 1
+    bool setActiveReporting(bool enable_reporting); // Uses Type 24
 
     // Mode Setting
     bool setModeVelocity();
     bool setModePositionCSP(float speed_limit = 2.0f, float current_limit = 23.0f);
+    bool setModeMit(); // Set Run Mode to 0 (MIT/Operation Control Mode)
     // bool setModePositionPP(float speed = 10.0f, float acceleration = 10.0f, float current_limit = 23.0f); // TODO
     // bool setModeCurrent(float torque_limit = 17.0f); // TODO
 
@@ -87,7 +89,7 @@ public:
     bool setVelocity(float speed_rad_s);                       // Requires Velocity Mode
     bool setPosition(float position_rad);                      // Requires Position Mode (CSP or PP)
     // bool setCurrent(float current_A);                          // Requires Current Mode // TODO
-    // bool setMitCommand(float position, float velocity, float kp, float kd, float torque); // Requires MIT Mode // TODO
+    bool setMitCommand(float position_rad, float velocity_rad_s, float kp, float kd, float torque_nm); // Uses Type 1
 
     // Parameter Access (using Type 17 Read / Type 18 Write)
     // Note: Writing parameters often requires saving (Type 22) to persist after power cycle.
@@ -106,6 +108,10 @@ public:
     Feedback getLastFeedback() const;
 
     void setMotorId(uint8_t new_id);
+    bool sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes, bool is_extended = true);
+
+    // Make packing utility public for use in main if needed
+    uint16_t packFloatToUint16(float x, float x_min, float x_max);
 
 private:
     CanInterface& can_;
@@ -120,7 +126,6 @@ private:
     // Data packing/unpacking helpers from manual
     int floatToUint(float x, float x_min, float x_max, int bits);
     float uintToFloat(int x_int, float x_min, float x_max, int bits);
-    uint16_t packFloatToUint16(float x, float x_min, float x_max);
 
 };
 

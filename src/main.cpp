@@ -128,14 +128,20 @@ void setup() {
   
   if (errorCode == 0) {
     Serial.println("CAN initialized successfully at 1 Mbit/s");
-    setAllPixelsColor(0, 50, 0);  // Green indicates success
-    delay(500);
+    // setAllPixelsColor(0, 50, 0);  // Green indicates success - will be set yellow for discovery
+    // delay(500);
   } else {
     Serial.print("Error initializing CAN: 0x");
     Serial.println(errorCode, HEX);
     setAllPixelsColor(50, 0, 0);  // Red indicates error
     while(1); // Halt on CAN error
   }
+
+  // Removed non-compiling checks for isBusOff() and error counters
+  Serial.println("CAN configured. Adding delay before discovery...");
+
+  // Add a small delay for peripheral/transceiver stabilization
+  delay(100);
 
   // --- Motor Discovery --- Loop through possible IDs indefinitely until found
   Serial.println("Attempting to discover motor by polling IDs 0-127 (repeating)... ");
@@ -147,7 +153,7 @@ void setup() {
     for (uint8_t id_to_test = 0; id_to_test <= 127; ++id_to_test) {
       // Add a small delay between polling different IDs to avoid flooding bus
       // and allow other tasks (like serial printing) to run.
-      if (id_to_test > 0) delay(5); 
+      if (id_to_test > 0) delay(10); // Increased delay to 10ms
       
       // Print status less aggressively inside the while loop
       if (id_to_test % 16 == 0) { // Print every 16 IDs
@@ -156,17 +162,31 @@ void setup() {
       // Serial.print("Polling ID: ");
       // Serial.print(id_to_test);
 
-      // Construct specific enable frame (Type 3, Target id_to_test, Master MASTER_ID)
-      CanFrame enableFrame;
-      enableFrame.id = (static_cast<uint32_t>(0x03) << 24) | (static_cast<uint32_t>(MASTER_ID) << 8) | id_to_test;
-      enableFrame.is_extended = true;
-      enableFrame.dlc = 0;
+      // Construct Type 0 Query Frame
+      CanFrame queryFrame;
+      // Type 0x00 (Bits 28-24)
+      // Data Area 2 (Bits 23-8): master_id_ in upper byte (as per manual for request frame)
+      // Destination Address (Bits 7-0): id_to_test
+      queryFrame.id = (static_cast<uint32_t>(0x00) << 24) | 
+                        (static_cast<uint32_t>(MASTER_ID) << 16) | // Assuming MASTER_ID in bits 16-23 of ID for consistency with how motor might form it
+                        (static_cast<uint32_t>(id_to_test));       // Target motor ID in bits 0-7
+      queryFrame.is_extended = true;
+      queryFrame.dlc = 0; // Type 0 request has no data payload
 
-      if (!canBus.sendFrame(enableFrame)) {
-          Serial.println(" - Failed to send enable command!");
+      // Print frame details before sending
+      Serial.print("  -> Sending Frame: ID=0x");
+      Serial.print(queryFrame.id, HEX);
+      Serial.print(" DLC=");
+      Serial.print(queryFrame.dlc);
+      // Serial.print(" Data="); // Data is empty
+
+      if (!canBus.sendFrame(queryFrame)) {
+          Serial.println(" - Failed to send query command!");
+          // Removed non-compiling checks for isBusOff() and error counters
+          delay(1000); // Wait 1 second before trying the next ID
           continue; // Try next ID
       } else {
-          Serial.println(" - Enable sent. Listening...");
+          Serial.println(" - Query sent. Listening...");
       }
 
       unsigned long pollingStartTime = millis();
@@ -174,27 +194,29 @@ void setup() {
           CanFrame receivedFrame;
           if (canBus.receiveFrame(receivedFrame, 0)) { // Poll non-blockingly
               if (receivedFrame.is_extended) {
-                  // Check if it's a Feedback frame (Type 2)
+                  // Check if it's a Type 0 Reply (to us, 0xFE)
                   uint8_t msgType = (receivedFrame.id >> 24) & 0x1F;
-                  if (msgType == 0x02) {
-                      // Extract responding motor ID from bits 8-15
-                      uint8_t respondingId = (receivedFrame.id >> 8) & 0xFF;
-                      // Check if the response is from the ID we just polled
-                      if (respondingId == id_to_test) {
-                           detectedMotorId = respondingId;
-                           Serial.print("\nMotor Found! Responded with ID: ");
-                           Serial.println(detectedMotorId);
+                  uint8_t destination_in_reply = receivedFrame.id & 0xFF;
 
-                           // Update the motor object to use this discovered ID
-                           motor.setMotorId(detectedMotorId);
+                  if (msgType == 0x00 && destination_in_reply == 0xFE) {
+                      // Extract responding motor ID from Data Area 2 (bits 23-8) of the reply ID
+                      // The manual states for reply: bit23~8 is target motor CAN_ID
+                      uint8_t motor_id_from_reply_data_area_2 = (receivedFrame.id >> 8) & 0xFF;
 
-                           motorFound = true;
-                           // goto discovery_done; // Exit the outer loop - No longer needed, while loop will exit
-                           break; // Exit the inner listening loop immediately
-                      } else {
-                           // Optional: Log if another motor responded unexpectedly
-                           // Serial.print("  (Ignoring response from ID: "); Serial.print(respondingId); Serial.println(")");
-                      }
+                      Serial.print("  Got Type 0 Reply, Dest=0xFE, From Motor ID (in data_area_2): ");
+                      Serial.println(motor_id_from_reply_data_area_2);
+
+                      // Accept the first valid Type 0 reply we get, regardless of which ID was polled.
+                      // The ID in the reply IS the ID of the responding motor.
+                      detectedMotorId = motor_id_from_reply_data_area_2;
+                      Serial.print("\nMotor Found! Responded to Query with its ID: ");
+                      Serial.println(detectedMotorId);
+
+                      // Update the motor object to use this discovered ID
+                      motor.setMotorId(detectedMotorId);
+
+                      motorFound = true;
+                      break; // Exit the inner listening loop immediately
                   }
               }
           }
@@ -224,126 +246,93 @@ void setup() {
 }
 
 unsigned long last_feedback_print_time = 0;
-const unsigned long FEEDBACK_PRINT_INTERVAL = 500; // Print feedback every 500ms
+// const unsigned long FEEDBACK_PRINT_INTERVAL = 500; // No longer using interval
 
 void loop() {
   // Check for received CAN messages
   CanFrame receivedFrame;
   if (canBus.receiveFrame(receivedFrame, 0)) { // Poll for received frames
+      Serial.println("* CAN Frame Received *" ); // DEBUG: Indicate any frame reception
       // Attempt to process the frame with the motor library
       if (motor.processFeedback(receivedFrame)) {
-          // If it was feedback for our motor, print it periodically
-          unsigned long now = millis();
-          if (now - last_feedback_print_time >= FEEDBACK_PRINT_INTERVAL) {
-              last_feedback_print_time = now;
-              RS03Motor::Feedback feedback = motor.getLastFeedback();
-              Serial.print("Feedback: ID="); Serial.print(static_cast<int>(feedback.motor_id));
-              Serial.print(" Pos="); Serial.print(feedback.position, 4);
-              Serial.print(" Vel="); Serial.print(feedback.velocity, 4);
-              Serial.print(" Torq="); Serial.print(feedback.torque, 4);
-              Serial.print(" Temp="); Serial.print(feedback.temperature, 1);
-              Serial.print(" Err=0x"); Serial.print(feedback.error_flags, HEX);
-              Serial.println();
-              // Set pixel green briefly on successful feedback decode
-              setAllPixelsColor(0, 20, 0);
-              delay(50);
-              setAllPixelsColor(0, 0, 50); // Back to blue
-          }
+          // If it was feedback for our motor, print it immediately
+          RS03Motor::Feedback feedback = motor.getLastFeedback();
+          Serial.print("FB: ID="); Serial.print(static_cast<int>(feedback.motor_id));
+          Serial.print(" M="); Serial.print(feedback.mode); // 0:Reset, 1:Cali, 2:Run
+          Serial.print(" E=0x"); Serial.print(feedback.error_flags, HEX);
+          Serial.print(" Pos="); Serial.print(feedback.position, 4);
+          Serial.print(" Vel="); Serial.print(feedback.velocity, 4);
+          Serial.print(" Torq="); Serial.print(feedback.torque, 4);
+          Serial.print(" Temp="); Serial.println(feedback.temperature, 1);
+          setAllPixelsColor(0, 20, 0);
+          delay(50); 
       } else {
-         // Optional: Print messages not processed by the motor instance
-         // Serial.print("Received other CAN frame: ID=0x"); Serial.println(receivedFrame.id, HEX);
-         // setAllPixelsColor(20, 20, 0); // Yellow for other messages
-         // delay(50);
-         // setAllPixelsColor(0, 0, 50); // Back to blue
+          Serial.println("  -> Frame ignored by motor handler."); 
       }
   }
 
-  // Keep Neopixel blue while running
-  // (Handled by feedback section now)
-
-  // Add any other loop tasks here
-  // --- Repeating Motor Test Sequence ---
   if (motorFound) {
-    Serial.println("\n--- Starting Motor Test Sequence ---");
+    Serial.println("\n--- Starting Motor RAW FRAME Test (Type 1 with Velocity) ---");
+    setAllPixelsColor(0, 0, 50); 
+
+    Serial.println("Attempting to Reset Faults...");
+    if (!motor.resetFaults()) { Serial.println(" -> Failed!"); }
+    delay(200); 
 
     Serial.println("Attempting to Enable motor...");
-    if (motor.enable()) {
-        Serial.println("Enable command sent successfully.");
-    } else {
-        Serial.println("Failed to send enable command!");
-    }
-    delay(1000); // Wait for motor to potentially enable/initialize
+    if (!motor.enable()) { Serial.println(" -> Failed!"); }
+    delay(200);
 
-    Serial.println("Attempting to Set Velocity Mode...");
-    if (motor.setModeVelocity()) { // Using default limits
-        Serial.println("Set Velocity Mode command sent successfully.");
-    } else {
-        Serial.println("Failed to send set velocity mode command!");
-    }
-    delay(200); // Allow time for mode change
+    Serial.println("Attempting to Enable Active Reporting...");
+    if (!motor.setActiveReporting(true)) { Serial.println(" -> Failed!"); }
+    delay(200); 
 
-    float test_velocity = 1.0f; // rad/s
-    Serial.print("Attempting to Set velocity to "); Serial.print(test_velocity); Serial.println(" rad/s...");
-    if (motor.setVelocity(test_velocity)) {
-        Serial.println("Set velocity command sent successfully.");
-    } else {
-        Serial.println("Failed to send set velocity command!");
-    }
-    delay(2000); // Run for 2 seconds
+    // Construct the Type 1 CAN ID: Type (0x01) | Packed Torque (16-bit) | Motor ID
+    // Using a nominal torque of 5.0 Nm for the ID (packs to 0x8AAA).
+    uint16_t packed_torque_for_id = motor.packFloatToUint16(5.0f, T_MIN, T_MAX);
+    uint32_t type1_can_id = (0x01UL << 24) | (static_cast<uint32_t>(packed_torque_for_id) << 8) | detectedMotorId;
 
-    Serial.println("Attempting to Set velocity to 0 rad/s...");
-    if (motor.setVelocity(0.0f)) {
-        Serial.println("Set velocity command sent successfully.");
-    } else {
-        Serial.println("Failed to send set velocity command!");
-    }
-    delay(1000);
+    // Data for Type 1: Pos (2B), Vel (2B), Kp (2B), Kd (2B) - Big Endian
+    uint16_t pos_raw = motor.packFloatToUint16(0.0f, P_MIN, P_MAX); // Target position 0
+    uint16_t kp_raw  = motor.packFloatToUint16(50.0f, KP_MIN, KP_MAX); // Example Kp
+    uint16_t kd_raw  = motor.packFloatToUint16(1.0f, KD_MIN, KD_MAX);  // Example Kd
 
-    Serial.println("Attempting to Set Position Mode (CSP)...");
-    float csp_speed_limit = 3.0f; // rad/s
-    float csp_current_limit = 15.0f; // Amps
-    if (motor.setModePositionCSP(csp_speed_limit, csp_current_limit)) {
-         Serial.println("Set Position Mode CSP command sent successfully.");
-    } else {
-         Serial.println("Failed to send set position mode CSP commands!");
-    }
-    delay(200); // Allow time for mode change
+    // --- JOG FORWARD ---
+    Serial.println("Sending RAW Type 1 JOG FORWARD (+1.0 rad/s)...");
+    uint16_t vel_fwd_raw = motor.packFloatToUint16(1.0f, V_MIN, V_MAX);
+    uint8_t data_fwd[] = {
+        (uint8_t)(pos_raw >> 8), (uint8_t)pos_raw,
+        (uint8_t)(vel_fwd_raw >> 8), (uint8_t)vel_fwd_raw,
+        (uint8_t)(kp_raw >> 8), (uint8_t)kp_raw,
+        (uint8_t)(kd_raw >> 8), (uint8_t)kd_raw
+    };
+    if (!motor.sendRawFrame(type1_can_id, 8, data_fwd)) { Serial.println(" -> SendRaw Failed!"); }
+    Serial.println("Waiting 4 seconds...");
+    delay(4000); 
 
-    float target_position1 = M_PI / 2.0f; // 90 degrees
-    Serial.print("Attempting to Set target position to "); Serial.print(target_position1); Serial.println(" rad...");
-    if (motor.setPosition(target_position1)) {
-        Serial.println("Set position command sent successfully.");
-    } else {
-        Serial.println("Failed to send set position command!");
-    }
-    delay(3000); // Wait 3 seconds for potential movement
-
-    float target_position2 = -M_PI / 2.0f; // -90 degrees
-    Serial.print("Attempting to Set target position to "); Serial.print(target_position2); Serial.println(" rad...");
-    if (motor.setPosition(target_position2)) {
-        Serial.println("Set position command sent successfully.");
-    } else {
-        Serial.println("Failed to send set position command!");
-    }
-    delay(3000); // Wait 3 seconds for potential movement
-
-    Serial.println("Attempting to Set target position to 0 rad...");
-    if (motor.setPosition(0.0f)) {
-        Serial.println("Set position command sent successfully.");
-    } else {
-        Serial.println("Failed to send set position command!");
-    }
-    delay(3000); // Wait 3 seconds for potential movement
-
-    Serial.println("--- Motor Test Sequence Finished. Restarting Loop ---");
-    delay(1000); // Pause before restarting the sequence
+    // --- STOP ---
+    Serial.println("Sending RAW Type 1 STOP (0.0 rad/s)...");
+    // A true stop velocity for floatToUint(0.0, -20, 20, 16) is 32767 (0x7FFF)
+    uint16_t vel_stop_raw = 0x7FFF; 
+    
+    uint8_t data_stop[] = {
+        (uint8_t)(pos_raw >> 8), (uint8_t)pos_raw,
+        (uint8_t)(vel_stop_raw >> 8), (uint8_t)vel_stop_raw,
+        (uint8_t)(kp_raw >> 8), (uint8_t)kp_raw,
+        (uint8_t)(kd_raw >> 8), (uint8_t)kd_raw
+    };
+    if (!motor.sendRawFrame(type1_can_id, 8, data_stop)) { Serial.println(" -> SendRaw Failed!"); }
+    Serial.println("Waiting 2 seconds...");
+    delay(2000);
+    
+    Serial.println("--- Motor RAW FRAME Type 1 JOG Test Finished. Restarting Loop --- ");
+    delay(2000); 
+    
   } else {
-    // Optional: Add behavior if motor wasn't found, e.g., blink red LED
-    // Or just do nothing if feedback monitoring is sufficient
-    delay(1000); // Prevent loop from spinning too fast if motor not found
-    // Keep LED Red
+    delay(1000); 
     setAllPixelsColor(50, 0, 0);
   }
+  delay(1); 
 }
 
 // Helper function to set all pixels to the same color
