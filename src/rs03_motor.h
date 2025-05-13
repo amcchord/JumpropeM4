@@ -110,6 +110,10 @@ public:
     void setMotorId(uint8_t new_id);
     bool sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes, bool is_extended = true);
 
+    // Data conversion utilities made public
+    float uintToFloat(int x_int, float x_min, float x_max, int bits);
+    int floatToUint(float x, float x_min, float x_max, int bits);
+
     // Make packing utility public for use in main if needed
     uint16_t packFloatToUint16(float x, float x_min, float x_max);
 
@@ -122,11 +126,6 @@ private:
     // Helper functions
     CanFrame createFrame(uint8_t type, uint16_t data_field_2 = 0, uint8_t dest_id = 0xFF);
     bool sendFrame(const CanFrame& frame);
-
-    // Data packing/unpacking helpers from manual
-    int floatToUint(float x, float x_min, float x_max, int bits);
-    float uintToFloat(int x_int, float x_min, float x_max, int bits);
-
 };
 
 #endif // RS03_MOTOR_H 

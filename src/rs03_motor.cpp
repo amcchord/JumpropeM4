@@ -326,22 +326,40 @@ bool RS03Motor::setActiveReporting(bool enable_reporting) {
 }
 
 bool RS03Motor::sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes, bool is_extended) {
+    // For debugging
+    Serial.print("Sending raw frame with ID: 0x");
+    Serial.print(id, HEX);
+    Serial.print(", DLC: ");
+    Serial.print(dlc);
+    Serial.print(", Extended: ");
+    Serial.println(is_extended ? "Yes" : "No");
+    
+    // Extended IDs need to fit in 29 bits (0x1FFFFFFF max)
+    if (is_extended && (id > 0x1FFFFFFF)) {
+        Serial.print("ERROR: Extended ID 0x");
+        Serial.print(id, HEX);
+        Serial.println(" exceeds 29-bit maximum");
+        return false;
+    }
+    
+    // Create and initialize a frame manually
     CanFrame frame;
     frame.id = id;
     frame.dlc = dlc > 8 ? 8 : dlc; // Ensure DLC is not more than 8
     frame.is_extended = is_extended;
+    
+    // Copy data if provided
     if (data_bytes != nullptr && frame.dlc > 0) {
         memcpy(frame.data, data_bytes, frame.dlc);
     } else if (frame.dlc > 0) {
-        // If dlc > 0 but data_bytes is null, send zeros (or handle as error)
-        // For safety, let's ensure data is zeroed if dlc > 0 and data is null, though this case should be avoided by caller.
+        // Zero out data if data_bytes is null but dlc > 0
         std::memset(frame.data, 0, frame.dlc);
     } else {
         frame.dlc = 0; // Ensure DLC is 0 if no data pointer or original dlc was 0
     }
 
     print_frame_details("SEND RAW FRAME:", frame); // Use existing helper
-    return can_.sendFrame(frame); 
+    return can_.sendFrame(frame);
 }
 
 // Private helper methods
