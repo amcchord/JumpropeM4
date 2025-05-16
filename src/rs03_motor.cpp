@@ -5,20 +5,33 @@
 #include <algorithm> // For std::min and std::max, if available and used instead of manual clamp
 #include <string>
 
+// ----- Debug Levels -----
+#define LOG_ERROR   1
+#define LOG_INFO    2
+#define LOG_DEBUG   3
+#define LOG_VERBOSE 4
+
+// Forward declaration - this function is defined in main.cpp
+extern void log(int level, const String& message);
+
 // Helper function for printing frames
 void print_frame_details(const char* label, const CanFrame& frame) {
-    // Check if Serial is available before printing
+    // Use LOG_DEBUG level - this will only print if the debug level in main.cpp
+    // is set to LOG_DEBUG (3) or higher
     if (Serial) { 
-        Serial.print(label);
-        Serial.print(" ID=0x"); Serial.print(frame.id, HEX);
-        Serial.print(" DLC="); Serial.print(frame.dlc);
-        Serial.print(" Data=[");
+        String frameDetails = String(label) + 
+                              " ID=0x" + String(frame.id, HEX) + 
+                              " DLC=" + String(frame.dlc) + 
+                              " Data=[";
+        
         for (int i = 0; i < frame.dlc; ++i) {
-            if (frame.data[i] < 0x10) Serial.print("0"); // Pad with leading zero if needed
-            Serial.print(frame.data[i], HEX);
-            if (i < frame.dlc - 1) Serial.print(" ");
+            if (frame.data[i] < 0x10) frameDetails += "0"; // Pad with leading zero
+            frameDetails += String(frame.data[i], HEX);
+            if (i < frame.dlc - 1) frameDetails += " ";
         }
-        Serial.println("]");
+        frameDetails += "]";
+        
+        log(LOG_DEBUG, frameDetails);
     }
 }
 
@@ -501,11 +514,11 @@ bool RS03Motor::hasErrors() const {
 // Implementation of setVelocityWithLimits
 bool RS03Motor::setVelocityWithLimits(float velocity, float current_limit, float acceleration) {
     bool ok = true;
-    Serial.println("Setting current limit...");
+   // Serial.println("Setting current limit...");
     ok = ok && setParameterFloat(INDEX_LIMIT_CUR, current_limit);
-    Serial.println("Setting acceleration...");
+   // Serial.println("Setting acceleration...");
     ok = ok && setParameterFloat(0x7022, acceleration); // acc_rad for velocity mode
-    Serial.println("Setting velocity...");
+   // Serial.println("Setting velocity...");
     ok = ok && setParameterFloat(INDEX_SPD_REF, velocity);
     return ok;
 }
