@@ -38,8 +38,8 @@
 // ----- Motor Configuration -----
 #define MOTOR_CURRENT_LIMIT 40.0f   // Current limit in amperes
 #define MOTOR_ACCELERATION  200.0f  // Acceleration limit in rad/s² for velocity mode
-#define POSITION_SPEED_LIMIT 10.0f  // Speed limit for position mode in rad/s
-#define POSITION_ACCELERATION 2.0f // Acceleration limit in rad/s² for position mode
+#define POSITION_SPEED_LIMIT 25.0f  // Speed limit for position mode in rad/s
+#define POSITION_ACCELERATION 20.0f // Acceleration limit in rad/s² for position mode
 #define MAX_VELOCITY        25.0f   // Maximum motor velocity in rad/s
 #define MIN_POSITION        -4.0f   // Minimum position in radians
 #define MAX_POSITION        4.0f    // Maximum position in radians
@@ -54,6 +54,7 @@
 #define LOG_INFO    2
 #define LOG_DEBUG   3
 #define LOG_VERBOSE 4
+#define LOG_WARNING 1  // Same level as LOG_ERROR since it's important but not fatal
 
 // Set current debug level
 const int DEBUG_LEVEL = LOG_INFO;
@@ -77,6 +78,7 @@ float mapPulseToPosition(int pulseWidth);
 void initializePositionMode();
 void initializeVelocityMode();
 void fetchAndReportMotorFeedback();
+void processCanMessages();
 
 // ----- Concrete CAN Interface for Feather M4 CAN -----
 // Class has been moved to FeatherM4CanInterface.h/cpp
@@ -135,22 +137,17 @@ void setAllPixelsColor(int red, int green, int blue) {
 
 // Initialize position mode with proper parameters
 void initializePositionMode() {
-    log(LOG_INFO, "Initializing position mode with proper limits");
+    log(LOG_INFO, "Initializing position mode (PP) with proper limits");
     
-    // First set the motor to position mode CSP with speed limit
-    if (!motor.setModePositionCSP(POSITION_SPEED_LIMIT, MOTOR_CURRENT_LIMIT)) {
-        log(LOG_ERROR, "Failed to set position mode!");
+    // Set the motor to Profile Position (PP) mode with speed and acceleration limits
+    if (!motor.setModePositionPP(POSITION_SPEED_LIMIT, POSITION_ACCELERATION, MOTOR_CURRENT_LIMIT)) {
+        log(LOG_ERROR, "Failed to set position mode (PP)!");
         return;
     }
     
-    // Set acceleration limit for position mode
-    if (!motor.setParameterFloat(0x7022, POSITION_ACCELERATION)) {
-        log(LOG_ERROR, "Failed to set acceleration limit for position mode!");
-    } else {
-        log(LOG_INFO, "Position mode set with speed limit: " + String(POSITION_SPEED_LIMIT) + 
-                      " rad/s, current limit: " + String(MOTOR_CURRENT_LIMIT) + 
-                      " A, acceleration: " + String(POSITION_ACCELERATION) + " rad/s²");
-    }
+    log(LOG_INFO, "Position mode (PP) set with speed limit: " + String(POSITION_SPEED_LIMIT) + 
+                  " rad/s, acceleration: " + String(POSITION_ACCELERATION) + 
+                  " rad/s², current limit: " + String(MOTOR_CURRENT_LIMIT) + " A");
     
     modeInitialized = true;
 }
@@ -205,6 +202,43 @@ void fetchAndReportMotorFeedback() {
     }
     
     log(LOG_INFO, "--------------------------------");
+}
+
+// Process incoming CAN messages
+void processCanMessages() {
+    // Check for any available CAN messages
+    int packetSize = CAN.parsePacket();
+    if (packetSize) {
+        // Create a CAN frame to hold the data
+        CanFrame frame;
+        frame.id = CAN.packetId();
+        frame.is_extended = CAN.packetExtended();
+        frame.dlc = packetSize;
+        
+        // Read data bytes
+        int i = 0;
+        while (CAN.available() && i < 8) {
+            frame.data[i++] = CAN.read();
+        }
+        
+        // Process the frame
+        if (motor.processFeedback(frame)) {
+            log(LOG_VERBOSE, "Processed motor feedback frame");
+        } else {
+            // For debugging, log the unprocessed frame details
+            String frameDetails = "Unprocessed CAN frame: ID=0x" + String(frame.id, HEX) + 
+                                  ", DLC=" + String(frame.dlc) + ", Data=[";
+            
+            for (int j = 0; j < frame.dlc; j++) {
+                if (frame.data[j] < 0x10) frameDetails += "0"; // Pad with leading zero
+                frameDetails += String(frame.data[j], HEX);
+                if (j < frame.dlc - 1) frameDetails += " ";
+            }
+            frameDetails += "]";
+            
+            log(LOG_VERBOSE, frameDetails);
+        }
+    }
 }
 
 // ----- Setup and Main Loop -----
@@ -267,6 +301,14 @@ void setup() {
     // Set the motor to velocity mode initially
     initializeVelocityMode();
     inPositionMode = false;
+    
+    // Set up active reporting from the motor
+    log(LOG_INFO, "Enabling active reporting from the motor...");
+    if (motor.setActiveReporting(true)) {
+        log(LOG_INFO, "Active reporting enabled");
+    } else {
+        log(LOG_ERROR, "Failed to enable active reporting");
+    }
     
     motorInitialized = true;
     setAllPixelsColor(0, 50, 0); // Green indicates ready
@@ -444,6 +486,9 @@ void loop() {
         }
         setAllPixelsColor(50, 0, 0); // Red if motor not initialized
     }
+    
+    // Process any incoming CAN messages to update feedback
+    processCanMessages();
     
     // Small delay to prevent tight looping
     delay(10);

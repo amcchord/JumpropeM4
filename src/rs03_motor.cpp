@@ -148,6 +148,21 @@ bool RS03Motor::setModePositionCSP(float speed_limit, float current_limit) {
     return success;
 }
 
+bool RS03Motor::setModePositionPP(float speed, float acceleration, float current_limit) {
+    print_frame_details(" -> setModePosPP calls:", CanFrame{}); // Indicate function call
+    bool success = true;
+    
+    // Set all the necessary parameters for PP mode
+    success &= setParameterFloat(INDEX_LIMIT_CUR, current_limit);    // Current limit
+    success &= setParameterFloat(INDEX_VEL_MAX_PP, speed);           // PP mode speed
+    success &= setParameterFloat(INDEX_ACC_SET_PP, acceleration);    // PP mode acceleration
+    
+    // Set mode to PP mode last
+    success &= setParameterUint8(INDEX_RUN_MODE, MODE_POS_PP);
+    
+    return success;
+}
+
 bool RS03Motor::setModeMit() {
     print_frame_details(" -> setModeMit calls:", CanFrame{}); // Indicate function call
     return setParameterUint8(INDEX_RUN_MODE, MODE_MIT); // MODE_MIT is 0

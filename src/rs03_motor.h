@@ -91,8 +91,8 @@ public:
     // Mode Setting
     bool setModeVelocity();
     bool setModePositionCSP(float speed_limit = 2.0f, float current_limit = 23.0f);
+    bool setModePositionPP(float speed = 10.0f, float acceleration = 10.0f, float current_limit = 23.0f);
     bool setModeMit(); // Set Run Mode to 0 (MIT/Operation Control Mode)
-    // bool setModePositionPP(float speed = 10.0f, float acceleration = 10.0f, float current_limit = 23.0f); // TODO
     // bool setModeCurrent(float torque_limit = 17.0f); // TODO
 
     // Commands (depend on current mode)
