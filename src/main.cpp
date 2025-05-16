@@ -37,8 +37,9 @@
 
 // ----- Motor Configuration -----
 #define MOTOR_CURRENT_LIMIT 40.0f   // Current limit in amperes
-#define MOTOR_ACCELERATION  200.0f  // Acceleration limit in rad/s²
+#define MOTOR_ACCELERATION  200.0f  // Acceleration limit in rad/s² for velocity mode
 #define POSITION_SPEED_LIMIT 10.0f  // Speed limit for position mode in rad/s
+#define POSITION_ACCELERATION 2.0f // Acceleration limit in rad/s² for position mode
 #define MAX_VELOCITY        25.0f   // Maximum motor velocity in rad/s
 #define MIN_POSITION        -4.0f   // Minimum position in radians
 #define MAX_POSITION        4.0f    // Maximum position in radians
@@ -143,12 +144,12 @@ void initializePositionMode() {
     }
     
     // Set acceleration limit for position mode
-    if (!motor.setParameterFloat(0x7022, MOTOR_ACCELERATION)) {
+    if (!motor.setParameterFloat(0x7022, POSITION_ACCELERATION)) {
         log(LOG_ERROR, "Failed to set acceleration limit for position mode!");
     } else {
         log(LOG_INFO, "Position mode set with speed limit: " + String(POSITION_SPEED_LIMIT) + 
                       " rad/s, current limit: " + String(MOTOR_CURRENT_LIMIT) + 
-                      " A, acceleration: " + String(MOTOR_ACCELERATION) + " rad/s²");
+                      " A, acceleration: " + String(POSITION_ACCELERATION) + " rad/s²");
     }
     
     modeInitialized = true;
