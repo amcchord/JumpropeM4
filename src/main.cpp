@@ -333,8 +333,10 @@ void loop() {
         lastDebugPrint = currentTime;
       }
       
-      // Set motor velocity
-      if (motor.setVelocity(targetVelocity)) {
+      // Use the new setVelocityWithLimits method
+      float currentLimit = 20.0f;
+      float acceleration = 200.0f;
+      if (motor.setVelocityWithLimits(targetVelocity, currentLimit, acceleration)) {
         // Set pixel color based on velocity
         if (targetVelocity > 0) {
           // Forward - green intensity based on speed
@@ -350,7 +352,7 @@ void loop() {
         }
       } else {
         if (currentTime - lastDebugPrint >= 500) { // Print errors only every 500ms
-          Serial.println("Failed to set motor velocity!");
+          Serial.println("Failed to set motor velocity/limits!");
         }
         setAllPixelsColor(50, 50, 0); // Yellow for command error
       }

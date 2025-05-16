@@ -498,5 +498,17 @@ bool RS03Motor::hasErrors() const {
     return last_feedback_.error_flags != 0;
 }
 
+// Implementation of setVelocityWithLimits
+bool RS03Motor::setVelocityWithLimits(float velocity, float current_limit, float acceleration) {
+    bool ok = true;
+    Serial.println("Setting current limit...");
+    ok = ok && setParameterFloat(INDEX_LIMIT_CUR, current_limit);
+    Serial.println("Setting acceleration...");
+    ok = ok && setParameterFloat(0x7022, acceleration); // acc_rad for velocity mode
+    Serial.println("Setting velocity...");
+    ok = ok && setParameterFloat(INDEX_SPD_REF, velocity);
+    return ok;
+}
+
 // Private helper methods
 // ... existing code ... 

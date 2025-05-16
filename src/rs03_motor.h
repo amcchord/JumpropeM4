@@ -134,6 +134,9 @@ public:
     std::string getErrorText() const;
     bool hasErrors() const;
 
+    // Add a method to set velocity, current limit, and acceleration at once
+    bool setVelocityWithLimits(float velocity, float current_limit, float acceleration);
+
 private:
     CanInterface& can_;
     uint8_t motor_id_;
