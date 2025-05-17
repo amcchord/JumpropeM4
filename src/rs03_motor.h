@@ -119,6 +119,7 @@ public:
     Feedback getLastFeedback() const;
 
     void setMotorId(uint8_t new_id);
+    uint8_t getMotorId() const { return motor_id_; } // Return the motor ID
     bool sendRawFrame(uint32_t id, uint8_t dlc, const uint8_t* data_bytes, bool is_extended = true);
 
     // Data conversion utilities made public

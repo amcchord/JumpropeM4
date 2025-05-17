@@ -17,7 +17,8 @@
 #define PIN            8    // NeoPixel data pin
 #define NUMPIXELS      1    // Number of NeoPixels
 #define CPPM_PIN       9    // Pin for CPPM signal input
-#define MOTOR_ID       127  // Fixed motor ID
+#define MOTOR_ID_1     127  // First motor ID
+#define MOTOR_ID_2     126  // Second motor ID
 #define MASTER_ID      0xFD // Default Master ID for commands
 
 // ----- CPPM Configuration -----
@@ -28,12 +29,16 @@
 #define CPPM_CHANNEL   0    // First channel (0-based index) for motor speed control
 #define MODE_CHANNEL   2    // Channel 3 (zero-indexed as 2) for mode control
 #define POS_CHANNEL    3    // Channel 4 (zero-indexed as 3) for position control
+#define SELECT_CHANNEL 4    // Channel 5 (zero-indexed as 4) for motor selection
 #define ZERO_CHANNEL   5    // Channel 6 (zero-indexed as 5) for position zeroing
 #define CPPM_CHANNELS  8    // Total number of CPPM channels
 
 // ----- Mode Selection Thresholds -----
 #define MODE_THRESHOLD 1800 // Above 1800us = position mode, below = velocity mode
 #define ZERO_THRESHOLD 1800 // Above 1800us = set position to zero
+#define SELECT_HIGH    1800 // Above 1800us = motor 1 only
+#define SELECT_LOW     1300 // Below 1300us = motor 2 only
+                            // Between 1300-1800 = both motors, motor 2 reversed
 
 // ----- Motor Configuration -----
 #define MOTOR_CURRENT_LIMIT 40.0f   // Current limit in amperes
@@ -65,7 +70,7 @@ CANSAME5x CAN;
 CPPMReader cppmReader(CPPM_PIN, 8, MIN_PULSE, MAX_PULSE, MID_PULSE);
 unsigned long lastMotorUpdateTime = 0;
 unsigned long lastFeedbackTime = 0;
-bool motorInitialized = false;
+bool motorsInitialized = false;
 bool inPositionMode = false;
 bool modeInitialized = false;
 float currentPosition = 0.0f;
@@ -88,17 +93,28 @@ void setAllPixelsColor(int red, int green, int blue);
 void log(int level, const String& message);
 float mapPulseToVelocity(int pulseWidth);
 float mapPulseToPosition(int pulseWidth);
-void initializePositionMode();
-void initializeVelocityMode();
-void fetchAndReportMotorFeedback();
+void initializePositionMode(RS03Motor& motor);
+void initializeVelocityMode(RS03Motor& motor);
+void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel);
 void processCanMessages();
-bool queryParameter(uint16_t index, float &value);
+bool queryParameter(uint16_t index, float &value, uint8_t motor_id);
 
 // ----- Concrete CAN Interface for Feather M4 CAN -----
 // Class has been moved to FeatherM4CanInterface.h/cpp
 
 FeatherM4CanInterface canBus;
-RS03Motor motor(canBus, MOTOR_ID, MASTER_ID);
+RS03Motor motor1(canBus, MOTOR_ID_1, MASTER_ID);
+RS03Motor motor2(canBus, MOTOR_ID_2, MASTER_ID);
+
+// Motor selection enum for clarity
+enum MotorSelection {
+    MOTOR_1_ONLY,     // Motor 1 only (ID 127)
+    MOTOR_2_ONLY,     // Motor 2 only (ID 126)
+    BOTH_MOTORS       // Both motors, with motor 2 reversed
+};
+
+// Current motor selection state
+MotorSelection currentMotorSelection = MOTOR_1_ONLY;
 
 // ----- Utility Functions -----
 
@@ -149,56 +165,124 @@ void setAllPixelsColor(int red, int green, int blue) {
     pixels.show();
 }
 
-// Initialize position mode with proper parameters
-void initializePositionMode() {
-    log(LOG_INFO, "Initializing position mode (PP) with proper limits");
+// Initialize position mode with proper parameters for specified motor
+void initializePositionMode(RS03Motor& motor) {
+    log(LOG_INFO, "Initializing position mode (PP) with proper limits for motor ID " + String(motor.getMotorId()));
     
     // Set the motor to Profile Position (PP) mode with speed and acceleration limits
     if (!motor.setModePositionPP(POSITION_SPEED_LIMIT, POSITION_ACCELERATION, MOTOR_CURRENT_LIMIT)) {
-        log(LOG_ERROR, "Failed to set position mode (PP)!");
+        log(LOG_ERROR, "Failed to set position mode (PP) for motor ID " + String(motor.getMotorId()) + "!");
         return;
     }
     
-    log(LOG_INFO, "Position mode (PP) set with speed limit: " + String(POSITION_SPEED_LIMIT) + 
+    log(LOG_INFO, "Position mode (PP) set for motor ID " + String(motor.getMotorId()) + 
+                  " with speed limit: " + String(POSITION_SPEED_LIMIT) + 
                   " rad/s, acceleration: " + String(POSITION_ACCELERATION) + 
                   " rad/s², current limit: " + String(MOTOR_CURRENT_LIMIT) + " A");
-    
-    modeInitialized = true;
 }
 
-// Initialize velocity mode with proper parameters
-void initializeVelocityMode() {
-    log(LOG_INFO, "Initializing velocity mode");
+// Initialize velocity mode with proper parameters for specified motor
+void initializeVelocityMode(RS03Motor& motor) {
+    log(LOG_INFO, "Initializing velocity mode for motor ID " + String(motor.getMotorId()));
     
     // Set the motor to velocity mode
     if (!motor.setModeVelocity()) {
-        log(LOG_ERROR, "Failed to set velocity mode!");
+        log(LOG_ERROR, "Failed to set velocity mode for motor ID " + String(motor.getMotorId()) + "!");
         return;
     }
 
     // Set current limit and acceleration for velocity mode
     bool success = true;
     if (!motor.setParameterFloat(INDEX_LIMIT_CUR, MOTOR_CURRENT_LIMIT)) {
-        log(LOG_ERROR, "Failed to set current limit for velocity mode!");
+        log(LOG_ERROR, "Failed to set current limit for velocity mode for motor ID " + String(motor.getMotorId()) + "!");
         success = false;
     }
     
     if (!motor.setParameterFloat(0x7022, MOTOR_ACCELERATION)) {
-        log(LOG_ERROR, "Failed to set acceleration limit for velocity mode!");
+        log(LOG_ERROR, "Failed to set acceleration limit for velocity mode for motor ID " + String(motor.getMotorId()) + "!");
         success = false;
     }
     
     if (success) {
-        log(LOG_INFO, "Velocity mode set with current limit: " + String(MOTOR_CURRENT_LIMIT) + 
+        log(LOG_INFO, "Velocity mode set for motor ID " + String(motor.getMotorId()) + 
+                      " with current limit: " + String(MOTOR_CURRENT_LIMIT) + 
                       " A, acceleration: " + String(MOTOR_ACCELERATION) + " rad/s²");
     }
+}
+
+// Helper function to initialize motors
+void initializeMotor(RS03Motor& motor) {
+    log(LOG_INFO, "Initializing motor with ID: " + String(motor.getMotorId()));
     
+    // Reset any faults
+    log(LOG_INFO, "Resetting motor faults for ID " + String(motor.getMotorId()) + "...");
+    if (!motor.resetFaults()) {
+        log(LOG_ERROR, "Failed to reset motor faults for ID " + String(motor.getMotorId()) + "!");
+    } else {
+        log(LOG_INFO, "Motor faults reset for ID " + String(motor.getMotorId()));
+    }
+    delay(100);
+    
+    // Enable the motor
+    log(LOG_INFO, "Enabling motor ID " + String(motor.getMotorId()) + "...");
+    if (!motor.enable()) {
+        log(LOG_ERROR, "Failed to enable motor ID " + String(motor.getMotorId()) + "!");
+    } else {
+        log(LOG_INFO, "Motor ID " + String(motor.getMotorId()) + " enabled");
+    }
+    delay(100);
+    
+    // Enable active reporting from the motor
+    log(LOG_INFO, "Enabling active reporting from motor ID " + String(motor.getMotorId()) + "...");
+    
+    bool reportingEnabled = motor.setActiveReporting(true);
+    
+    if (!reportingEnabled) {
+        log(LOG_WARNING, "Library method failed, trying direct approach for active reporting for motor ID " + String(motor.getMotorId()));
+        
+        // Type 5 message for active reporting command
+        uint32_t reportingId = ((static_cast<uint32_t>(0x05) << 24) | 
+                              (static_cast<uint32_t>(MASTER_ID) << 8) | 
+                              static_cast<uint32_t>(motor.getMotorId())) & 0x1FFFFFFF;
+        
+        uint8_t reportingData[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = enable reporting
+        
+        if (CAN.beginExtendedPacket(reportingId)) {
+            CAN.write(reportingData, 8);
+            if (CAN.endPacket()) {
+                log(LOG_INFO, "Direct active reporting command sent for motor ID " + String(motor.getMotorId()));
+                reportingEnabled = true;
+            } else {
+                log(LOG_ERROR, "Failed to send direct active reporting command for motor ID " + String(motor.getMotorId()));
+            }
+        } else {
+            log(LOG_ERROR, "Failed to begin direct active reporting packet for motor ID " + String(motor.getMotorId()));
+        }
+    }
+    
+    if (reportingEnabled) {
+        log(LOG_INFO, "Active reporting enabled for motor ID " + String(motor.getMotorId()));
+    } else {
+        log(LOG_ERROR, "Failed to enable active reporting for motor ID " + String(motor.getMotorId()));
+    }
+}
+
+// Initialize both motors in the same control mode
+void initializeMotorsForMode(bool positionMode) {
+    if (positionMode) {
+        log(LOG_INFO, "Initializing all motors in position mode");
+        initializePositionMode(motor1);
+        initializePositionMode(motor2);
+    } else {
+        log(LOG_INFO, "Initializing all motors in velocity mode");
+        initializeVelocityMode(motor1);
+        initializeVelocityMode(motor2);
+    }
     modeInitialized = true;
 }
 
-// Fetch and report motor feedback
-void fetchAndReportMotorFeedback() {
-    // We'll directly query each parameter rather than relying on getLastFeedback
+// Fetch and report motor feedback from the specified motor
+void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel) {
     float position = 0.0f;
     float velocity = 0.0f;
     float torque = 0.0f;
@@ -208,90 +292,58 @@ void fetchAndReportMotorFeedback() {
     int mode = 0;
     bool success = false;
     
-    // Check if we have recent raw feedback from Type 2 messages (less than 500ms old)
-    if (g_raw_feedback_received && (millis() - g_last_raw_feedback_time < 500)) {
-        // Use the raw feedback data
-        position = g_raw_position;
-        velocity = g_raw_velocity;
-        torque = g_raw_torque;
-        temperature = g_raw_temperature;
-        success = true;
-        log(LOG_DEBUG, "Using raw feedback data from Type 2 messages");
-    }
-    
     // Parameter indices
     const uint16_t INDEX_POSITION = 0x7000;
     const uint16_t INDEX_VELOCITY = 0x7001;
     const uint16_t INDEX_TORQUE = 0x7002;
     const uint16_t INDEX_TEMPERATURE = 0x7007;
     const uint16_t INDEX_VBUS = 0x701C;
-    const uint16_t INDEX_MODE = 0x7005;  // Corrected from 0x7030 to 0x7005 (run_mode)
-    const uint16_t INDEX_CURRENT = 0x701A; // IQF (iq Filter) - motor current
+    const uint16_t INDEX_MODE = 0x7005;
+    const uint16_t INDEX_CURRENT = 0x701A;
     
-    // Even if we have raw feedback, always query VBUS and Mode
-    // as they're not included in Type 2 messages
+    // Query parameters using the motor's ID
+    uint8_t motorId = motor.getMotorId();
     
-    // Parameter index: 0x701C = VBUS
-    if (queryParameter(INDEX_VBUS, vbus)) {
-        log(LOG_DEBUG, "Direct VBUS query success: " + String(vbus));
+    if (queryParameter(INDEX_POSITION, position, motorId)) {
+        success = true;
     }
     
-    // Parameter index: 0x7005 = Mode
-    float mode_float = 0.0f;
-    if (queryParameter(INDEX_MODE, mode_float)) {
-        mode = (int)mode_float;
-        log(LOG_DEBUG, "Direct mode query success: " + String(mode));
+    if (queryParameter(INDEX_VELOCITY, velocity, motorId)) {
+        success = true;
     }
     
-    // Parameter index: 0x701A = Current (IQF)
-    if (queryParameter(INDEX_CURRENT, current)) {
-        log(LOG_DEBUG, "Direct current query success: " + String(current));
+    if (queryParameter(INDEX_TORQUE, torque, motorId)) {
+        success = true;
     }
     
-    // If we don't have raw feedback, query all parameters directly
+    if (queryParameter(INDEX_TEMPERATURE, temperature, motorId)) {
+        success = true;
+    }
+    
+    if (queryParameter(INDEX_VBUS, vbus, motorId)) {
+        success = true;
+    }
+    
+    if (queryParameter(INDEX_CURRENT, current, motorId)) {
+        success = true;
+    }
+    
+    if (queryParameter(INDEX_MODE, position, motorId)) {
+        mode = (int)position; // Using position as temporary storage
+    }
+    
+    // If direct querying failed, use last feedback from the motor
     if (!success) {
-        // Directly query all parameters
-        // Parameter index: 0x7000 = Position
-        if (queryParameter(INDEX_POSITION, position)) {
-            success = true;
-            log(LOG_DEBUG, "Direct position query success: " + String(position));
-        }
-        
-        // Parameter index: 0x7001 = Velocity
-        if (queryParameter(INDEX_VELOCITY, velocity)) {
-            success = true;
-            log(LOG_DEBUG, "Direct velocity query success: " + String(velocity));
-        }
-        
-        // Parameter index: 0x7002 = Torque
-        if (queryParameter(INDEX_TORQUE, torque)) {
-            success = true;
-            log(LOG_DEBUG, "Direct torque query success: " + String(torque));
-        }
-        
-        // Parameter index: 0x7007 = Temperature
-        if (queryParameter(INDEX_TEMPERATURE, temperature)) {
-            success = true;
-            log(LOG_DEBUG, "Direct temperature query success: " + String(temperature));
-        }
-    }
-    
-    // Only if we couldn't get any direct queries or raw feedback, fall back to last feedback
-    if (!success) {
-        // Get the motor's feedback information
         RS03Motor::Feedback feedback = motor.getLastFeedback();
         position = feedback.position;
         velocity = feedback.velocity;
         torque = feedback.torque;
         temperature = feedback.temperature;
         mode = feedback.mode;
-        
-        // Note: current may not be available in the feedback structure
-        // so we keep the last queried value
     }
     
-    // Report position, velocity, and general status
-    log(LOG_INFO, "-------- MOTOR FEEDBACK --------");
+    // Report data
+    log(LOG_INFO, "-------- " + motorLabel + " FEEDBACK --------");
     log(LOG_INFO, "Position: " + String(position) + " rad");
     log(LOG_INFO, "Velocity: " + String(velocity) + " rad/s");
     log(LOG_INFO, "Torque:   " + String(torque) + " Nm");
@@ -306,25 +358,24 @@ void fetchAndReportMotorFeedback() {
     // Report errors if any
     if (motor.hasErrors()) {
         uint16_t error_flags = motor.getLastFeedback().error_flags;
-        log(LOG_ERROR, "Error flags: 0x" + String(error_flags, HEX));
-        // Convert getErrorText() result to String to avoid compilation issues
-        log(LOG_ERROR, "Error description: " + String(motor.getErrorText().c_str()));
+        log(LOG_ERROR, motorLabel + " Error flags: 0x" + String(error_flags, HEX));
+        log(LOG_ERROR, motorLabel + " Error description: " + String(motor.getErrorText().c_str()));
     }
     
     log(LOG_INFO, "--------------------------------");
 }
 
 // Helper function to query a parameter from the motor
-bool queryParameter(uint16_t index, float &value) {
+bool queryParameter(uint16_t index, float &value, uint8_t motor_id) {
     // Create a Type 17 frame to read the parameter
-    uint32_t readId = ((0x11) << 24) | (MASTER_ID << 8) | MOTOR_ID;
+    uint32_t readId = ((0x11) << 24) | (MASTER_ID << 8) | motor_id;
     uint8_t readData[8] = {0};
     // Parameter index in little-endian
     readData[0] = index & 0xFF;        // Low byte of index
     readData[1] = (index >> 8) & 0xFF; // High byte of index
     
     if (DEBUG_LEVEL >= LOG_DEBUG) {
-        log(LOG_DEBUG, "Querying parameter 0x" + String(index, HEX) + " - ID: 0x" + String(readId, HEX));
+        log(LOG_DEBUG, "Querying parameter 0x" + String(index, HEX) + " from motor ID " + String(motor_id) + " - ID: 0x" + String(readId, HEX));
     }
     
     // Send the request
@@ -387,6 +438,9 @@ void processCanMessages() {
         // Check specifically for Type 2 (feedback) messages
         uint8_t msgType = (frame.id >> 24) & 0x1F;
         if (msgType == 0x02 && frame.dlc == 8) {
+            // Extract source motor ID (for Type 2 messages it's in the upper byte of data field 2)
+            uint8_t sourceMotorId = (frame.id >> 8) & 0xFF;
+            
             // Extract Type 2 feedback data according to format:
             // Bytes 0-1: Current position (16-bit)
             // Bytes 2-3: Current velocity (16-bit)
@@ -399,24 +453,26 @@ void processCanMessages() {
             uint16_t temp_raw = (static_cast<uint16_t>(frame.data[6]) << 8) | frame.data[7];
             
             // Apply conversions using RS03Motor constants
-            g_raw_position = motor.uintToFloat(pos_raw, P_MIN, P_MAX, 16);
-            g_raw_velocity = motor.uintToFloat(vel_raw, V_MIN, V_MAX, 16);
-            g_raw_torque = motor.uintToFloat(torque_raw, T_MIN, T_MAX, 16);
+            g_raw_position = motor1.uintToFloat(pos_raw, P_MIN, P_MAX, 16);
+            g_raw_velocity = motor1.uintToFloat(vel_raw, V_MIN, V_MAX, 16);
+            g_raw_torque = motor1.uintToFloat(torque_raw, T_MIN, T_MAX, 16);
             g_raw_temperature = static_cast<float>(temp_raw) / 10.0f;
             
             g_raw_feedback_received = true;
             g_last_raw_feedback_time = millis();
             
             if (DEBUG_LEVEL >= LOG_VERBOSE) {
-                log(LOG_VERBOSE, "Type 2 feedback received: Pos=" + String(g_raw_position, 4) +
+                log(LOG_VERBOSE, "Type 2 feedback from Motor ID " + String(sourceMotorId) + 
+                                 ": Pos=" + String(g_raw_position, 4) +
                                  " Vel=" + String(g_raw_velocity, 4) +
                                  " Torq=" + String(g_raw_torque, 4) +
                                  " Temp=" + String(g_raw_temperature, 1));
             }
         }
         
-        // Process the frame with the motor library as well
-        bool processed = motor.processFeedback(frame);
+        // Process the frame with both motors
+        bool processed1 = motor1.processFeedback(frame);
+        bool processed2 = motor2.processFeedback(frame);
         
         // Log frame details for debugging
         if (DEBUG_LEVEL >= LOG_VERBOSE) {
@@ -434,7 +490,7 @@ void processCanMessages() {
             log(LOG_VERBOSE, frameDetails);
         }
         
-        if (processed) {
+        if (processed1 || processed2) {
             log(LOG_VERBOSE, "Processed motor feedback frame");
         }
     }
@@ -446,7 +502,7 @@ void setup() {
     // Initialize Serial for debugging
     Serial.begin(115200);
     while (!Serial && millis() < 5000);
-    log(LOG_INFO, "RS03 Motor Control with RC Input - Starting");
+    log(LOG_INFO, "RS03 Dual Motor Control with RC Input - Starting");
     
     // Initialize the NeoPixel
     pixels.begin();
@@ -476,123 +532,24 @@ void setup() {
         setAllPixelsColor(50, 0, 50);
     }
 
-    // Initialize motor with fixed ID
-    log(LOG_INFO, "Using motor ID: " + String(MOTOR_ID));
+    // Initialize motors with their IDs
+    log(LOG_INFO, "Initializing motors with IDs: " + String(MOTOR_ID_1) + " and " + String(MOTOR_ID_2));
     
-    // Reset any faults
-    log(LOG_INFO, "Resetting motor faults...");
-    if (!motor.resetFaults()) {
-        log(LOG_ERROR, "Failed to reset motor faults!");
-    } else {
-        log(LOG_INFO, "Motor faults reset");
-    }
-    delay(200);
+    // Initialize both motors
+    initializeMotor(motor1);
+    initializeMotor(motor2);
     
-    // Enable the motor
-    log(LOG_INFO, "Enabling motor...");
-    if (!motor.enable()) {
-        log(LOG_ERROR, "Failed to enable motor!");
-    } else {
-        log(LOG_INFO, "Motor enabled");
-    }
-    delay(200);
-    
-    // Set the motor to velocity mode initially
-    initializeVelocityMode();
+    // Set the motors to velocity mode initially
+    initializeMotorsForMode(false);  // false = velocity mode
     inPositionMode = false;
     
-    // Set up active reporting from the motor using direct CAN communication
-    log(LOG_INFO, "Enabling active reporting from the motor...");
-    
-    // First try using the library method
-    bool reportingEnabled = motor.setActiveReporting(true);
-    
-    // If that fails, try a direct approach based on main-old.cpp
-    if (!reportingEnabled) {
-        log(LOG_WARNING, "Library method failed, trying direct approach for active reporting");
-        
-        // Type 5 message for active reporting command
-        uint32_t reportingId = ((static_cast<uint32_t>(0x05) << 24) | 
-                              (static_cast<uint32_t>(MASTER_ID) << 8) | 
-                              static_cast<uint32_t>(MOTOR_ID)) & 0x1FFFFFFF;
-        
-        uint8_t reportingData[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = enable reporting
-        
-        if (CAN.beginExtendedPacket(reportingId)) {
-            CAN.write(reportingData, 8);
-            if (CAN.endPacket()) {
-                log(LOG_INFO, "Direct active reporting command sent");
-                reportingEnabled = true;
-            } else {
-                log(LOG_ERROR, "Failed to send direct active reporting command");
-            }
-        } else {
-            log(LOG_ERROR, "Failed to begin direct active reporting packet");
-        }
-    }
-    
-    if (reportingEnabled) {
-        log(LOG_INFO, "Active reporting enabled");
-    } else {
-        log(LOG_ERROR, "Failed to enable active reporting");
-    }
-    
-    // Verify motor communication by reading VBUS
-    log(LOG_INFO, "Verifying motor communication by reading VBUS...");
-    float vbus = 0.0f;
-    bool vbusSuccess = false;
-    
-    // Create a Type 17 frame to read the VBUS parameter
-    uint32_t readId = ((0x11) << 24) | (MASTER_ID << 8) | MOTOR_ID;
-    uint8_t readData[8] = {0};
-    readData[0] = 0x1C;  // 0x701C = VBUS register (low byte)
-    readData[1] = 0x70;  // high byte
-    
-    // Send the request
-    if (CAN.beginExtendedPacket(readId & 0x1FFFFFFF)) {
-        CAN.write(readData, 8);
-        if (CAN.endPacket()) {
-            // Wait for response
-            unsigned long startTime = millis();
-            while (millis() - startTime < 500 && !vbusSuccess) {
-                int packetSize = CAN.parsePacket();
-                if (packetSize) {
-                    uint32_t id = CAN.packetId();
-                    uint8_t responseType = (id >> 24) & 0x1F;
-                    
-                    // Read the data payload
-                    uint8_t data[8] = {0};
-                    for (int i = 0; i < packetSize && i < 8; i++) {
-                        data[i] = CAN.read();
-                    }
-                    
-                    // Check for the Type 0x11 response
-                    if (responseType == 0x11) {
-                        uint16_t responseIndex = data[0] | (data[1] << 8);
-                        if (responseIndex == 0x701C) {
-                            memcpy(&vbus, &data[4], sizeof(float));
-                            if (vbus > 5.0f && vbus < 60.0f) {
-                                log(LOG_INFO, "VBUS voltage: " + String(vbus) + " V");
-                                vbusSuccess = true;
-                            }
-                        }
-                    }
-                }
-                delay(1);
-            }
-        }
-    }
-    
-    if (!vbusSuccess) {
-        log(LOG_WARNING, "Could not read VBUS voltage. Motor may not be responding correctly.");
-    }
-    
-    motorInitialized = true;
+    motorsInitialized = true;
     setAllPixelsColor(0, 50, 0); // Green indicates ready
     log(LOG_INFO, "Setup complete. Ready for CPPM control.");
     log(LOG_INFO, "Channel 1 (index 0): 1000us=-20rad/s, 1500us=stop, 2000us=20rad/s");
     log(LOG_INFO, "Channel 3 (index 2): >1800us=position mode, <1800us=velocity mode");
     log(LOG_INFO, "Channel 4 (index 3): 1000us=-4rad, 2000us=+4rad (in position mode)");
+    log(LOG_INFO, "Channel 5 (index 4): >1800us=motor 1, <1300us=motor 2, 1300-1800us=both (motor 2 reversed)");
     log(LOG_INFO, "Channel 6 (index 5): >1800us=set current position as zero");
     delay(50);
 }
@@ -615,20 +572,35 @@ void loop() {
         delayMicroseconds(100);
     }
 
-    // Periodically request motor state directly using Type 0 query
+    // Periodically request motor state directly using Type 0 query for both motors
     static unsigned long lastDirectQueryTime = 0;
     unsigned long currentTime = millis();
     if (currentTime - lastDirectQueryTime >= 100) { // Every 100ms
-        // Send a Type 0 query to request motor state
-        uint32_t queryId = ((0x00) << 24) | (MASTER_ID << 16) | MOTOR_ID;
-        if (CAN.beginExtendedPacket(queryId & 0x1FFFFFFF)) {
-            // Type 0 has no data
-            if (CAN.endPacket()) {
-                if (DEBUG_LEVEL >= LOG_VERBOSE) {
-                    log(LOG_VERBOSE, "Sent Type 0 query to request motor state");
+        // Send a Type 0 query to request state from both motors based on current selection
+        if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
+            uint32_t queryId1 = ((0x00) << 24) | (MASTER_ID << 16) | MOTOR_ID_1;
+            if (CAN.beginExtendedPacket(queryId1 & 0x1FFFFFFF)) {
+                // Type 0 has no data
+                if (CAN.endPacket()) {
+                    if (DEBUG_LEVEL >= LOG_VERBOSE) {
+                        log(LOG_VERBOSE, "Sent Type 0 query to request motor 1 state");
+                    }
                 }
             }
         }
+        
+        if (currentMotorSelection == MOTOR_2_ONLY || currentMotorSelection == BOTH_MOTORS) {
+            uint32_t queryId2 = ((0x00) << 24) | (MASTER_ID << 16) | MOTOR_ID_2;
+            if (CAN.beginExtendedPacket(queryId2 & 0x1FFFFFFF)) {
+                // Type 0 has no data
+                if (CAN.endPacket()) {
+                    if (DEBUG_LEVEL >= LOG_VERBOSE) {
+                        log(LOG_VERBOSE, "Sent Type 0 query to request motor 2 state");
+                    }
+                }
+            }
+        }
+        
         lastDirectQueryTime = currentTime;
     }
 
@@ -644,12 +616,36 @@ void loop() {
         lastChannelPrint = currentTime;
     }
 
-    // Handle CPPM control of the motor
-    if (motorInitialized) {
+    // Handle CPPM control of the motors
+    if (motorsInitialized) {
         static unsigned long lastDebugPrint = 0;
         unsigned long currentTime = millis();
         
-        // Check if we need to switch modes
+        // Check which motor(s) to control based on SELECT_CHANNEL (Channel 5)
+        int selectChannelValue = cppmReader.getChannel(SELECT_CHANNEL);
+        MotorSelection newMotorSelection;
+        
+        if (selectChannelValue > SELECT_HIGH) {
+            newMotorSelection = MOTOR_1_ONLY;
+        } else if (selectChannelValue < SELECT_LOW) {
+            newMotorSelection = MOTOR_2_ONLY;
+        } else {
+            newMotorSelection = BOTH_MOTORS;
+        }
+        
+        // Log if the motor selection changed
+        if (newMotorSelection != currentMotorSelection) {
+            String selectionText;
+            switch (newMotorSelection) {
+                case MOTOR_1_ONLY: selectionText = "Motor 1 only (ID " + String(MOTOR_ID_1) + ")"; break;
+                case MOTOR_2_ONLY: selectionText = "Motor 2 only (ID " + String(MOTOR_ID_2) + ")"; break;
+                case BOTH_MOTORS: selectionText = "Both motors (Motor 2 reversed)"; break;
+            }
+            log(LOG_INFO, "Motor selection changed: " + selectionText);
+            currentMotorSelection = newMotorSelection;
+        }
+        
+        // Check if we need to switch control modes
         int modeChannelValue = cppmReader.getChannel(MODE_CHANNEL);
         bool shouldBeInPositionMode = modeChannelValue > MODE_THRESHOLD;
         
@@ -664,11 +660,7 @@ void loop() {
         
         // Initialize the appropriate mode if needed
         if (!modeInitialized) {
-            if (inPositionMode) {
-                initializePositionMode();
-            } else {
-                initializeVelocityMode();
-            }
+            initializeMotorsForMode(inPositionMode);
         }
         
         // Check if we need to zero the position
@@ -689,9 +681,17 @@ void loop() {
                 // While holding zero, force the target position to remain at 0
                 currentPosition = 0.0f;
                 
-                // Set the position to zero
-                if (!motor.setPosition(0.0f)) {
-                    log(LOG_ERROR, "Failed to hold zero position!");
+                // Set the position to zero for the active motor(s)
+                if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                    if (!motor1.setPosition(0.0f)) {
+                        log(LOG_ERROR, "Failed to hold zero position for motor 1!");
+                    }
+                }
+                
+                if (currentMotorSelection == MOTOR_2_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                    if (!motor2.setPosition(0.0f)) {
+                        log(LOG_ERROR, "Failed to hold zero position for motor 2!");
+                    }
                 }
             }
         }
@@ -706,10 +706,24 @@ void loop() {
                 log(LOG_INFO, "Setting current position as zero in velocity mode");
             }
             
-            // Use the proper method to set mechanical zero (Communication Type 6)
-            if (!motor.setMechanicalZero()) {
-                log(LOG_ERROR, "Failed to set mechanical zero!");
-            } else {
+            // Set mechanical zero based on current motor selection
+            bool zeroSuccess = true;
+            
+            if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                if (!motor1.setMechanicalZero()) {
+                    log(LOG_ERROR, "Failed to set mechanical zero for motor 1!");
+                    zeroSuccess = false;
+                }
+            }
+            
+            if (currentMotorSelection == MOTOR_2_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                if (!motor2.setMechanicalZero()) {
+                    log(LOG_ERROR, "Failed to set mechanical zero for motor 2!");
+                    zeroSuccess = false;
+                }
+            }
+            
+            if (zeroSuccess) {
                 // Reset our internal position tracking
                 currentPosition = 0.0f;
                 
@@ -731,13 +745,9 @@ void loop() {
             // If no signal is detected, default to center position (stop/neutral)
             if (!cppmReader.isReceiving()) {
                 log(LOG_ERROR, "No CPPM signal detected!");
-                // Set motor to safe state
-                if (inPositionMode) {
-                    // Hold current position
-                } else {
-                    // Stop motor
-                    motor.setVelocity(0);
-                }
+                // Set motors to safe state
+                motor1.setVelocity(0);
+                motor2.setVelocity(0);
                 setAllPixelsColor(50, 50, 0); // Yellow for no signal
             } else {
                 if (inPositionMode && modeInitialized) {
@@ -757,11 +767,37 @@ void loop() {
                         lastDebugPrint = currentTime;
                     }
                     
-                    // Set position - note that speed and current limits were set during mode initialization
-                    // If holding zero, we force the position to 0, otherwise use the target position
+                    // Calculate position to set (0 if holding zero, otherwise target position)
                     float positionToSet = holdingZeroPosition ? 0.0f : targetPosition;
-                    if (motor.setPosition(positionToSet)) {
-                        // Set pixel color based on position
+                    
+                    // Set position for the appropriate motor(s)
+                    bool success = true;
+                    
+                    // For motor 1
+                    if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                        if (!motor1.setPosition(positionToSet)) {
+                            log(LOG_ERROR, "Failed to set position for motor 1!");
+                            success = false;
+                        }
+                    }
+                    
+                    // For motor 2 (with reversed direction when in BOTH_MOTORS mode)
+                    if (currentMotorSelection == MOTOR_2_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                        float motor2Position = positionToSet;
+                        
+                        // In BOTH_MOTORS mode, reverse the direction for motor 2
+                        if (currentMotorSelection == BOTH_MOTORS) {
+                            motor2Position = -positionToSet;
+                        }
+                        
+                        if (!motor2.setPosition(motor2Position)) {
+                            log(LOG_ERROR, "Failed to set position for motor 2!");
+                            success = false;
+                        }
+                    }
+                    
+                    // Set LED color based on position and success
+                    if (success) {
                         if (holdingZeroPosition) {
                             // Pulsing white color for zero hold mode
                             int pulseIntensity = (millis() / 100) % 50; // 0-49 pulsing effect
@@ -779,9 +815,6 @@ void loop() {
                             setAllPixelsColor(20, 20, 20);
                         }
                     } else {
-                        if (currentTime - lastDebugPrint >= DEBUG_PRINT_INTERVAL) {
-                            log(LOG_ERROR, "Failed to set motor position!");
-                        }
                         setAllPixelsColor(50, 50, 0); // Yellow for command error
                     }
                     
@@ -797,9 +830,34 @@ void loop() {
                         lastDebugPrint = currentTime;
                     }
                     
-                    // Set motor velocity with limits
-                    if (motor.setVelocityWithLimits(targetVelocity, MOTOR_CURRENT_LIMIT, MOTOR_ACCELERATION)) {
-                        // Set pixel color based on velocity
+                    // Track success for LED color
+                    bool success = true;
+                    
+                    // Set velocity for the appropriate motor(s)
+                    if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                        if (!motor1.setVelocityWithLimits(targetVelocity, MOTOR_CURRENT_LIMIT, MOTOR_ACCELERATION)) {
+                            log(LOG_ERROR, "Failed to set velocity for motor 1!");
+                            success = false;
+                        }
+                    }
+                    
+                    // For motor 2 (with reversed direction when in BOTH_MOTORS mode)
+                    if (currentMotorSelection == MOTOR_2_ONLY || currentMotorSelection == BOTH_MOTORS) {
+                        float motor2Velocity = targetVelocity;
+                        
+                        // In BOTH_MOTORS mode, reverse the direction for motor 2
+                        if (currentMotorSelection == BOTH_MOTORS) {
+                            motor2Velocity = -targetVelocity;
+                        }
+                        
+                        if (!motor2.setVelocityWithLimits(motor2Velocity, MOTOR_CURRENT_LIMIT, MOTOR_ACCELERATION)) {
+                            log(LOG_ERROR, "Failed to set velocity for motor 2!");
+                            success = false;
+                        }
+                    }
+                    
+                    // Set LED color based on velocity and success
+                    if (success) {
                         if (targetVelocity > 0) {
                             // Forward - green intensity based on speed
                             int intensity = map(abs(targetVelocity * 1000), 0, MAX_VELOCITY * 1000, 0, 50);
@@ -813,9 +871,6 @@ void loop() {
                             setAllPixelsColor(0, 0, 20);
                         }
                     } else {
-                        if (currentTime - lastDebugPrint >= DEBUG_PRINT_INTERVAL) {
-                            log(LOG_ERROR, "Failed to set motor velocity/limits!");
-                        }
                         setAllPixelsColor(50, 50, 0); // Yellow for command error
                     }
                 }
@@ -826,19 +881,28 @@ void loop() {
         
         // Fetch and report motor feedback in both position and velocity modes
         if (currentTime - lastFeedbackTime >= FEEDBACK_INTERVAL) {
-            fetchAndReportMotorFeedback();
+            // Report feedback based on current motor selection
+            if (currentMotorSelection == MOTOR_1_ONLY) {
+                fetchAndReportMotorFeedback(motor1, "MOTOR 1");
+            } else if (currentMotorSelection == MOTOR_2_ONLY) {
+                fetchAndReportMotorFeedback(motor2, "MOTOR 2");
+            } else { // BOTH_MOTORS
+                fetchAndReportMotorFeedback(motor1, "MOTOR 1");
+                fetchAndReportMotorFeedback(motor2, "MOTOR 2");
+            }
+            
             lastFeedbackTime = currentTime;
         }
     } else {
-        // Motor not initialized
+        // Motors not initialized
         unsigned long currentTime = millis();
         static unsigned long lastErrorPrint = 0;
         
         if (currentTime - lastErrorPrint >= 1000) {
-            log(LOG_ERROR, "Motor not initialized!");
+            log(LOG_ERROR, "Motors not initialized!");
             lastErrorPrint = currentTime;
         }
-        setAllPixelsColor(50, 0, 0); // Red if motor not initialized
+        setAllPixelsColor(50, 0, 0); // Red if motors not initialized
     }
     
     // Small delay to prevent tight looping
