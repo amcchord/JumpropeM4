@@ -35,6 +35,9 @@ public:
     bool update();
 
 private:
+    // Median filter size
+    static const int FILTER_SIZE = 3;
+    
     int _pin;
     int _numChannels;
     int _minValue;
@@ -42,10 +45,16 @@ private:
     int _defaultValue;
     
     volatile int* _channelValues;
+    volatile int** _channelHistory;
+    volatile int* _historyIndex;
+    
     volatile bool _receivingSignal;
     volatile unsigned long _lastFrameTime;
     volatile unsigned long _lastPulseTime;
     volatile int _currentChannel;
+    
+    // Calculate median of 3 values
+    int calculateMedian(const int values[FILTER_SIZE]) const;
     
     // Internal interrupt handler (non-static)
     void handleInterrupt();

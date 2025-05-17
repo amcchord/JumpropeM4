@@ -13,9 +13,24 @@ CPPMReader::CPPMReader(int pin, int numChannels, int minValue, int maxValue, int
     // Allocate memory for channel values
     _channelValues = new volatile int[_numChannels];
     
+    // Allocate memory for channel history (for median filtering)
+    _channelHistory = new volatile int*[_numChannels];
+    for (int i = 0; i < _numChannels; i++) {
+        _channelHistory[i] = new volatile int[FILTER_SIZE];
+    }
+    
+    // Allocate memory for history indices
+    _historyIndex = new volatile int[_numChannels];
+    
     // Initialize arrays
     for (int i = 0; i < _numChannels; i++) {
         _channelValues[i] = _defaultValue;
+        _historyIndex[i] = 0;
+        
+        // Initialize history with default values
+        for (int j = 0; j < FILTER_SIZE; j++) {
+            _channelHistory[i][j] = _defaultValue;
+        }
     }
     
     // Initialize other variables
@@ -35,6 +50,13 @@ CPPMReader::~CPPMReader() {
     
     // Free memory
     delete[] _channelValues;
+    
+    // Free channel history memory
+    for (int i = 0; i < _numChannels; i++) {
+        delete[] _channelHistory[i];
+    }
+    delete[] _channelHistory;
+    delete[] _historyIndex;
     
     // Clear the static instance if it's this one
     if (_instance == this) {
@@ -63,7 +85,47 @@ int CPPMReader::getChannel(int channel) const {
         return _defaultValue;
     }
     
-    return _channelValues[channel];
+    // Get history values for this channel
+    int values[FILTER_SIZE];
+    for (int i = 0; i < FILTER_SIZE; i++) {
+        values[i] = _channelHistory[channel][i];
+    }
+    
+    // Return the median value
+    return calculateMedian(values);
+}
+
+int CPPMReader::calculateMedian(const int values[FILTER_SIZE]) const {
+    // For a 3-element array, we can use a simple sorting approach
+    int sortedValues[FILTER_SIZE];
+    
+    // Copy values to avoid modifying the original array
+    for (int i = 0; i < FILTER_SIZE; i++) {
+        sortedValues[i] = values[i];
+    }
+    
+    // Simple sort (for 3 elements, this is efficient enough)
+    if (sortedValues[0] > sortedValues[1]) {
+        int temp = sortedValues[0];
+        sortedValues[0] = sortedValues[1];
+        sortedValues[1] = temp;
+    }
+    
+    if (sortedValues[1] > sortedValues[2]) {
+        int temp = sortedValues[1];
+        sortedValues[1] = sortedValues[2];
+        sortedValues[2] = temp;
+        
+        // After swapping, we need to check the first two elements again
+        if (sortedValues[0] > sortedValues[1]) {
+            int temp = sortedValues[0];
+            sortedValues[0] = sortedValues[1];
+            sortedValues[1] = temp;
+        }
+    }
+    
+    // The middle value is the median
+    return sortedValues[1];
 }
 
 bool CPPMReader::isReceiving() const {
@@ -115,6 +177,14 @@ void CPPMReader::handleInterrupt() {
         // Convert pulse gap to channel value (pulse width)
         // Cast pulseWidth to avoid signed/unsigned comparison warning
         int value = constrain((int)pulseWidth, _minValue, _maxValue);
+        
+        // Store the current value in the history
+        _channelHistory[_currentChannel][_historyIndex[_currentChannel]] = value;
+        
+        // Update the history index (circular buffer)
+        _historyIndex[_currentChannel] = (_historyIndex[_currentChannel] + 1) % FILTER_SIZE;
+        
+        // Also update the current value (for backward compatibility)
         _channelValues[_currentChannel] = value;
     }
     

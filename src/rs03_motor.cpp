@@ -130,6 +130,16 @@ bool RS03Motor::resetFaults() {
     return sendFrame(frame);
 }
 
+bool RS03Motor::setMechanicalZero() {
+    // Communication Type 6: Set Motor Mechanical Zero
+    CanFrame frame = createFrame(6, master_id_, motor_id_);
+    frame.dlc = 8;
+    std::memset(frame.data, 0, sizeof(frame.data));
+    frame.data[0] = 1; // Set to 1 to set mechanical zero
+    print_frame_details("SEND setMechZero:", frame);
+    return sendFrame(frame);
+}
+
 
 // --- Mode Setting ---
 

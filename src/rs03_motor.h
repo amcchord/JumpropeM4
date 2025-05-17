@@ -87,6 +87,7 @@ public:
     bool disable();
     bool resetFaults(); // Uses Type 4 with data[0] = 1
     bool setActiveReporting(bool enable_reporting); // Uses Type 24
+    bool setMechanicalZero(); // Uses Type 6 to set the current position as zero
 
     // Mode Setting
     bool setModeVelocity();
