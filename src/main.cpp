@@ -41,13 +41,13 @@
                             // Between 1300-1800 = both motors, motor 2 reversed
 
 // ----- Motor Configuration -----
-#define MOTOR_CURRENT_LIMIT 40.0f   // Current limit in amperes
+#define MOTOR_CURRENT_LIMIT 0.5f   // Current limit in amperes
 #define MOTOR_ACCELERATION  200.0f  // Acceleration limit in rad/s² for velocity mode
 #define POSITION_SPEED_LIMIT 25.0f  // Speed limit for position mode in rad/s
-#define POSITION_ACCELERATION 20.0f // Acceleration limit in rad/s² for position mode
+#define POSITION_ACCELERATION 200.0f // Acceleration limit in rad/s² for position mode
 #define MAX_VELOCITY        25.0f   // Maximum motor velocity in rad/s
-#define MIN_POSITION        -4.0f   // Minimum position in radians
-#define MAX_POSITION        4.0f    // Maximum position in radians
+#define MIN_POSITION        -6.28f   // Minimum position in radians
+#define MAX_POSITION        6.28f    // Maximum position in radians
 
 // ----- Timing Configuration -----
 #define MOTOR_UPDATE_RATE_MS 20     // 20ms = 50 updates per second (increased from 50ms)
@@ -80,13 +80,29 @@ unsigned long lastZeroSetTime = 0;
 bool holdingZeroPosition = false;
 unsigned long zeroHoldStartTime = 0;
 
-// Global variables to store raw feedback from CAN messages
-float g_raw_position = 0.0f;
-float g_raw_velocity = 0.0f;
-float g_raw_torque = 0.0f;
-float g_raw_temperature = 0.0f;
-bool g_raw_feedback_received = false;
-unsigned long g_last_raw_feedback_time = 0;
+// Define a structure to hold raw feedback data for each motor
+struct MotorRawFeedback {
+    float position = 0.0f;
+    float velocity = 0.0f;
+    float torque = 0.0f;
+    float temperature = 0.0f;
+    bool received = false;
+    unsigned long timestamp = 0;
+};
+
+// Global variables to store raw feedback for each motor
+MotorRawFeedback motor1_feedback;
+MotorRawFeedback motor2_feedback;
+
+// Motor selection enum for clarity
+enum MotorSelection {
+    MOTOR_1_ONLY,     // Motor 1 only (ID 127)
+    MOTOR_2_ONLY,     // Motor 2 only (ID 126)
+    BOTH_MOTORS       // Both motors, with motor 2 reversed
+};
+
+// Current motor selection state
+MotorSelection currentMotorSelection = MOTOR_1_ONLY;
 
 // ----- Function Prototypes -----
 void setAllPixelsColor(int red, int green, int blue);
@@ -105,16 +121,6 @@ bool queryParameter(uint16_t index, float &value, uint8_t motor_id);
 FeatherM4CanInterface canBus;
 RS03Motor motor1(canBus, MOTOR_ID_1, MASTER_ID);
 RS03Motor motor2(canBus, MOTOR_ID_2, MASTER_ID);
-
-// Motor selection enum for clarity
-enum MotorSelection {
-    MOTOR_1_ONLY,     // Motor 1 only (ID 127)
-    MOTOR_2_ONLY,     // Motor 2 only (ID 126)
-    BOTH_MOTORS       // Both motors, with motor 2 reversed
-};
-
-// Current motor selection state
-MotorSelection currentMotorSelection = MOTOR_1_ONLY;
 
 // ----- Utility Functions -----
 
@@ -289,6 +295,7 @@ void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel) {
     float temperature = 0.0f;
     float vbus = 0.0f;
     float current = 0.0f;
+    float mode_float = 0.0f;
     int mode = 0;
     bool success = false;
     
@@ -301,39 +308,88 @@ void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel) {
     const uint16_t INDEX_MODE = 0x7005;
     const uint16_t INDEX_CURRENT = 0x701A;
     
-    // Query parameters using the motor's ID
+    // Get the motor's ID
     uint8_t motorId = motor.getMotorId();
     
-    if (queryParameter(INDEX_POSITION, position, motorId)) {
-        success = true;
+    log(LOG_INFO, "Querying feedback from " + motorLabel + " (ID " + String(motorId) + ")");
+    
+    // Check if we have recent raw feedback from Type 2 messages for this motor
+    bool useRawFeedback = false;
+    unsigned long currentTime = millis();
+    
+    // Get reference to the appropriate feedback structure
+    MotorRawFeedback* rawFeedback = nullptr;
+    if (motorId == MOTOR_ID_1) {
+        rawFeedback = &motor1_feedback;
+    } else if (motorId == MOTOR_ID_2) {
+        rawFeedback = &motor2_feedback;
     }
     
-    if (queryParameter(INDEX_VELOCITY, velocity, motorId)) {
+    // Check if we have recent raw feedback (less than 500ms old)
+    if (rawFeedback && rawFeedback->received && (currentTime - rawFeedback->timestamp < 500)) {
+        position = rawFeedback->position;
+        velocity = rawFeedback->velocity;
+        torque = rawFeedback->torque;
+        temperature = rawFeedback->temperature;
+        useRawFeedback = true;
         success = true;
+        log(LOG_DEBUG, "Using raw feedback data from Type 2 messages for " + motorLabel);
     }
     
-    if (queryParameter(INDEX_TORQUE, torque, motorId)) {
-        success = true;
-    }
+    // Even if we have raw feedback, we still need to query these parameters
+    // as they're not included in Type 2 messages
     
-    if (queryParameter(INDEX_TEMPERATURE, temperature, motorId)) {
-        success = true;
-    }
-    
+    // Parameter index: 0x701C = VBUS (always query this)
     if (queryParameter(INDEX_VBUS, vbus, motorId)) {
         success = true;
+        log(LOG_DEBUG, "Direct VBUS query success for " + motorLabel + ": " + String(vbus));
     }
     
+    // Parameter index: 0x7005 = Mode (always query this)
+    if (queryParameter(INDEX_MODE, mode_float, motorId)) {
+        mode = (int)mode_float;
+        success = true;
+        log(LOG_DEBUG, "Direct mode query success for " + motorLabel + ": " + String(mode));
+    }
+    
+    // Parameter index: 0x701A = Current (IQF) (always query this)
     if (queryParameter(INDEX_CURRENT, current, motorId)) {
         success = true;
+        log(LOG_DEBUG, "Direct current query success for " + motorLabel + ": " + String(current));
     }
     
-    if (queryParameter(INDEX_MODE, position, motorId)) {
-        mode = (int)position; // Using position as temporary storage
+    // If we don't have raw feedback, query all remaining parameters directly
+    if (!useRawFeedback) {
+        // Position
+        if (queryParameter(INDEX_POSITION, position, motorId)) {
+            success = true;
+            log(LOG_DEBUG, "Direct position query success for " + motorLabel + ": " + String(position));
+        }
+        
+        // Velocity
+        if (queryParameter(INDEX_VELOCITY, velocity, motorId)) {
+            success = true;
+            log(LOG_DEBUG, "Direct velocity query success for " + motorLabel + ": " + String(velocity));
+        }
+        
+        // Torque
+        if (queryParameter(INDEX_TORQUE, torque, motorId)) {
+            success = true;
+            log(LOG_DEBUG, "Direct torque query success for " + motorLabel + ": " + String(torque));
+        }
+        
+        // Temperature (if not already obtained from raw feedback)
+        if (!useRawFeedback) {
+            if (queryParameter(INDEX_TEMPERATURE, temperature, motorId)) {
+                success = true;
+                log(LOG_DEBUG, "Direct temperature query success for " + motorLabel + ": " + String(temperature));
+            }
+        }
     }
     
     // If direct querying failed, use last feedback from the motor
     if (!success) {
+        log(LOG_WARNING, "Failed to query parameters directly for " + motorLabel + ", using last feedback");
         RS03Motor::Feedback feedback = motor.getLastFeedback();
         position = feedback.position;
         velocity = feedback.velocity;
@@ -380,11 +436,13 @@ bool queryParameter(uint16_t index, float &value, uint8_t motor_id) {
     
     // Send the request
     if (!CAN.beginExtendedPacket(readId & 0x1FFFFFFF)) {
+        log(LOG_ERROR, "Failed to begin extended packet for motor ID " + String(motor_id));
         return false;
     }
     
     CAN.write(readData, 8);
     if (!CAN.endPacket()) {
+        log(LOG_ERROR, "Failed to send packet for motor ID " + String(motor_id));
         return false;
     }
     
@@ -395,6 +453,7 @@ bool queryParameter(uint16_t index, float &value, uint8_t motor_id) {
         if (packetSize) {
             uint32_t id = CAN.packetId();
             uint8_t responseType = (id >> 24) & 0x1F;
+            uint8_t responseMotorId = (id >> 8) & 0xFF; // Extract motor ID from the response
             
             // Read the data payload
             uint8_t data[8] = {0};
@@ -402,17 +461,28 @@ bool queryParameter(uint16_t index, float &value, uint8_t motor_id) {
                 data[i] = CAN.read();
             }
             
-            // Check for the Type 0x11 response
-            if (responseType == 0x11) {
+            // Check for the Type 0x11 response from the specific motor
+            if (responseType == 0x11 && responseMotorId == motor_id) {
                 uint16_t responseIndex = data[0] | (data[1] << 8);
                 if (responseIndex == index) {
                     // The value is stored as a float in the last 4 bytes
                     memcpy(&value, &data[4], sizeof(float));
+                    
+                    if (DEBUG_LEVEL >= LOG_DEBUG) {
+                        log(LOG_DEBUG, "Got response for param 0x" + String(index, HEX) + " from motor ID " + 
+                            String(motor_id) + ": " + String(value));
+                    }
+                    
                     return true;
                 }
             }
         }
         delay(1);
+    }
+    
+    if (DEBUG_LEVEL >= LOG_DEBUG) {
+        log(LOG_DEBUG, "Timeout waiting for parameter 0x" + String(index, HEX) + 
+                  " from motor ID " + String(motor_id));
     }
     
     return false;
@@ -453,20 +523,48 @@ void processCanMessages() {
             uint16_t temp_raw = (static_cast<uint16_t>(frame.data[6]) << 8) | frame.data[7];
             
             // Apply conversions using RS03Motor constants
-            g_raw_position = motor1.uintToFloat(pos_raw, P_MIN, P_MAX, 16);
-            g_raw_velocity = motor1.uintToFloat(vel_raw, V_MIN, V_MAX, 16);
-            g_raw_torque = motor1.uintToFloat(torque_raw, T_MIN, T_MAX, 16);
-            g_raw_temperature = static_cast<float>(temp_raw) / 10.0f;
+            float position = motor1.uintToFloat(pos_raw, P_MIN, P_MAX, 16);
+            float velocity = motor1.uintToFloat(vel_raw, V_MIN, V_MAX, 16);
+            float torque = motor1.uintToFloat(torque_raw, T_MIN, T_MAX, 16);
+            float temperature = static_cast<float>(temp_raw) / 10.0f;
             
-            g_raw_feedback_received = true;
-            g_last_raw_feedback_time = millis();
-            
-            if (DEBUG_LEVEL >= LOG_VERBOSE) {
-                log(LOG_VERBOSE, "Type 2 feedback from Motor ID " + String(sourceMotorId) + 
-                                 ": Pos=" + String(g_raw_position, 4) +
-                                 " Vel=" + String(g_raw_velocity, 4) +
-                                 " Torq=" + String(g_raw_torque, 4) +
-                                 " Temp=" + String(g_raw_temperature, 1));
+            // Store in the appropriate motor's feedback structure
+            if (sourceMotorId == MOTOR_ID_1) {
+                motor1_feedback.position = position;
+                motor1_feedback.velocity = velocity;
+                motor1_feedback.torque = torque;
+                motor1_feedback.temperature = temperature;
+                motor1_feedback.received = true;
+                motor1_feedback.timestamp = millis();
+                
+                if (DEBUG_LEVEL >= LOG_VERBOSE) {
+                    log(LOG_VERBOSE, "Type 2 feedback from Motor 1 (ID " + String(sourceMotorId) + 
+                                     "): Pos=" + String(position, 4) +
+                                     " Vel=" + String(velocity, 4) +
+                                     " Torq=" + String(torque, 4) +
+                                     " Temp=" + String(temperature, 1));
+                }
+            } 
+            else if (sourceMotorId == MOTOR_ID_2) {
+                motor2_feedback.position = position;
+                motor2_feedback.velocity = velocity;
+                motor2_feedback.torque = torque;
+                motor2_feedback.temperature = temperature;
+                motor2_feedback.received = true;
+                motor2_feedback.timestamp = millis();
+                
+                if (DEBUG_LEVEL >= LOG_VERBOSE) {
+                    log(LOG_VERBOSE, "Type 2 feedback from Motor 2 (ID " + String(sourceMotorId) + 
+                                     "): Pos=" + String(position, 4) +
+                                     " Vel=" + String(velocity, 4) +
+                                     " Torq=" + String(torque, 4) +
+                                     " Temp=" + String(temperature, 1));
+                }
+            }
+            else {
+                if (DEBUG_LEVEL >= LOG_VERBOSE) {
+                    log(LOG_VERBOSE, "Type 2 feedback from unknown Motor ID " + String(sourceMotorId));
+                }
             }
         }
         
