@@ -8,6 +8,9 @@
 #include <cmath> // For M_PI and fabs()
 #include "CPPMReader.h" // Include CPPM reader
 #include "FeatherM4CanInterface.h" // Include the new header file
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -64,12 +67,21 @@
 // Set current debug level
 const int DEBUG_LEVEL = LOG_INFO;
 
+// ----- OLED Display Configuration -----
+#define SCREEN_WIDTH 128     // OLED display width, in pixels
+#define SCREEN_HEIGHT 64     // OLED display height, in pixels
+#define OLED_RESET     -1    // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C  // I2C address of the OLED display (typically 0x3C or 0x3D)
+#define DISPLAY_UPDATE_RATE_MS 150  // Update display every 150ms
+
 // ----- Global Objects -----
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 CANSAME5x CAN;
 CPPMReader cppmReader(CPPM_PIN, 8, MIN_PULSE, MAX_PULSE, MID_PULSE);
 unsigned long lastMotorUpdateTime = 0;
 unsigned long lastFeedbackTime = 0;
+unsigned long lastDisplayUpdateTime = 0;
 bool motorsInitialized = false;
 bool inPositionMode = false;
 bool modeInitialized = false;
@@ -112,8 +124,105 @@ float mapPulseToPosition(int pulseWidth);
 void initializePositionMode(RS03Motor& motor);
 void initializeVelocityMode(RS03Motor& motor);
 void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel);
-void processCanMessages();
 bool queryParameter(uint16_t index, float &value, uint8_t motor_id);
+void processCanMessages();
+
+// Function to update the OLED display with motor feedback
+void updateDisplay() {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    
+    // Display mode and motor selection at the top
+    display.println(inPositionMode ? "MODE: POSITION" : "MODE: VELOCITY");
+    
+    String motorSelectionText;
+    switch (currentMotorSelection) {
+        case MOTOR_1_ONLY: motorSelectionText = "MOTOR: M1 ONLY"; break;
+        case MOTOR_2_ONLY: motorSelectionText = "MOTOR: M2 ONLY"; break;
+        case BOTH_MOTORS: motorSelectionText = "MOTORS: M1 & M2"; break;
+    }
+    display.println(motorSelectionText);
+    
+    // Draw a line separator below the header
+    display.drawLine(0, 16, 127, 16, SSD1306_WHITE);
+    
+    // Setup column headers
+    display.setCursor(0, 18);
+    display.print("MOTOR 1");
+    display.setCursor(75, 18);
+    display.print("MOTOR 2");
+    
+    // Draw a vertical separator between columns
+    display.drawLine(64, 16, 64, 63, SSD1306_WHITE);
+    
+    // Set up data labels
+    display.setCursor(0, 28);
+    display.print("Pos:");
+    display.setCursor(75, 28);
+    display.print("Pos:");
+    
+    display.setCursor(0, 38);
+    display.print("Vel:");
+    display.setCursor(75, 38);
+    display.print("Vel:");
+    
+    display.setCursor(0, 48);
+    display.print("Trq:");
+    display.setCursor(75, 48);
+    display.print("Trq:");
+    
+    // Display Motor 1 data values (right-aligned in left column)
+    if (motor1_feedback.received) {
+        // Position
+        String posStr = String(motor1_feedback.position, 2);
+        int posWidth = posStr.length() * 6; // approx 6 pixels per character
+        display.setCursor(59 - posWidth, 28);
+        display.print(posStr);
+        
+        // Velocity
+        String velStr = String(motor1_feedback.velocity, 2);
+        int velWidth = velStr.length() * 6;
+        display.setCursor(59 - velWidth, 38);
+        display.print(velStr);
+        
+        // Torque
+        String trqStr = String(motor1_feedback.torque, 2);
+        int trqWidth = trqStr.length() * 6;
+        display.setCursor(59 - trqWidth, 48);
+        display.print(trqStr);
+    } else {
+        display.setCursor(30, 38);
+        display.print("NO DATA");
+    }
+    
+    // Display Motor 2 data values (right-aligned in right column)
+    if (motor2_feedback.received) {
+        // Position
+        String posStr = String(motor2_feedback.position, 2);
+        int posWidth = posStr.length() * 6;
+        display.setCursor(124 - posWidth, 28);
+        display.print(posStr);
+        
+        // Velocity
+        String velStr = String(motor2_feedback.velocity, 2);
+        int velWidth = velStr.length() * 6;
+        display.setCursor(124 - velWidth, 38);
+        display.print(velStr);
+        
+        // Torque
+        String trqStr = String(motor2_feedback.torque, 2);
+        int trqWidth = trqStr.length() * 6;
+        display.setCursor(124 - trqWidth, 48);
+        display.print(trqStr);
+    } else {
+        display.setCursor(95, 38);
+        display.print("NO DATA");
+    }
+    
+    display.display();
+}
 
 // ----- Concrete CAN Interface for Feather M4 CAN -----
 // Class has been moved to FeatherM4CanInterface.h/cpp
@@ -602,6 +711,22 @@ void setup() {
     while (!Serial && millis() < 5000);
     log(LOG_INFO, "RS03 Dual Motor Control with RC Input - Starting");
     
+    // Initialize the OLED display
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        log(LOG_ERROR, "SSD1306 OLED display initialization failed");
+    } else {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("RS03 Dual Motor");
+        display.println("Control System");
+        display.println("");
+        display.println("Initializing...");
+        display.display();
+        log(LOG_INFO, "SSD1306 OLED display initialized");
+    }
+    
     // Initialize the NeoPixel
     pixels.begin();
     pixels.setBrightness(50);
@@ -649,6 +774,18 @@ void setup() {
     log(LOG_INFO, "Channel 4 (index 3): 1000us=-4rad, 2000us=+4rad (in position mode)");
     log(LOG_INFO, "Channel 5 (index 4): >1800us=motor 1, <1300us=motor 2, 1300-1800us=both (motor 2 reversed)");
     log(LOG_INFO, "Channel 6 (index 5): >1800us=set current position as zero");
+    
+    // Update display with ready status
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("System Ready!");
+    display.println("");
+    display.println("Waiting for");
+    display.println("CPPM control input");
+    display.display();
+    
     delay(50);
 }
 
@@ -991,6 +1128,12 @@ void loop() {
             
             lastFeedbackTime = currentTime;
         }
+        
+        // Update the OLED display
+        if (currentTime - lastDisplayUpdateTime >= DISPLAY_UPDATE_RATE_MS) {
+            updateDisplay();
+            lastDisplayUpdateTime = currentTime;
+        }
     } else {
         // Motors not initialized
         unsigned long currentTime = millis();
@@ -999,6 +1142,16 @@ void loop() {
         if (currentTime - lastErrorPrint >= 1000) {
             log(LOG_ERROR, "Motors not initialized!");
             lastErrorPrint = currentTime;
+            
+            // Update display with error
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("ERROR:");
+            display.println("Motors not");
+            display.println("initialized!");
+            display.display();
         }
         setAllPixelsColor(50, 0, 0); // Red if motors not initialized
     }
