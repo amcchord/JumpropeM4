@@ -6,7 +6,7 @@
 #include <chrono>
 #include <thread>
 #include <cmath> // For M_PI and fabs()
-#include "CPPMReader.h" // Include CPPM reader
+#include "SpektrumSatelliteReader.h" // Include Spektrum satellite reader
 #include "FeatherM4CanInterface.h" // Include the new header file
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -19,23 +19,28 @@
 // ----- Pin and Hardware Configuration -----
 #define PIN            8    // NeoPixel data pin
 #define NUMPIXELS      1    // Number of NeoPixels
-#define CPPM_PIN       9    // Pin for CPPM signal input
+#define SPEKTRUM_SERIAL Serial1  // Serial port for Spektrum satellite receiver
+#define BIND_MODE_PIN  A0   // Pin to check for bind mode (connect to ground to enable bind mode)
+#define SPEKTRUM_RX_PIN 0   // Pin 0 (D0/RX) - used for both bind pulses and serial data
 #define MOTOR_ID_1     127  // First motor ID
 #define MOTOR_ID_2     126  // Second motor ID
 #define MASTER_ID      0xFD // Default Master ID for commands
 
-// ----- CPPM Configuration -----
+// ----- Spektrum Satellite Configuration -----
 #define MIN_PULSE      1000 // 1000us = -20 rad/s
 #define MID_PULSE      1500 // 1500us = dead zone
 #define MAX_PULSE      2000 // 2000us = 20 rad/s
 #define DEAD_ZONE      50   // ±50us dead zone around 1500us
-#define CPPM_CHANNEL   0    // First channel (0-based index) for motor speed control
+#define SPEKTRUM_CHANNEL   0    // First channel (0-based index) for motor speed control
 #define CURRENT_CHANNEL 1   // Channel 2 (zero-indexed as 1) for current limit control
 #define MODE_CHANNEL   2    // Channel 3 (zero-indexed as 2) for mode control
 #define POS_CHANNEL    0    // Channel 4 (zero-indexed as 3) for position control
 #define SELECT_CHANNEL 4    // Channel 5 (zero-indexed as 4) for motor selection
 #define ZERO_CHANNEL   5    // Channel 6 (zero-indexed as 5) for position zeroing
-#define CPPM_CHANNELS  8    // Total number of CPPM channels
+#define SPEKTRUM_CHANNELS  7     // Total number of Spektrum channels (max 7 per frame)
+
+// ----- Bind Mode Configuration -----
+#define BIND_ENABLED false  // Set to true to enable bind mode
 
 // ----- Mode Selection Thresholds -----
 #define MODE_THRESHOLD 1800 // Above 1800us = position mode, below = velocity mode
@@ -79,7 +84,7 @@ const int DEBUG_LEVEL = LOG_INFO;
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 CANSAME5x CAN;
-CPPMReader cppmReader(CPPM_PIN, 8, MIN_PULSE, MAX_PULSE, MID_PULSE);
+SpektrumSatelliteReader spektrumReader(SPEKTRUM_SERIAL, SPEKTRUM_CHANNELS, MIN_PULSE, MAX_PULSE, MID_PULSE);
 unsigned long lastMotorUpdateTime = 0;
 unsigned long lastFeedbackTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
@@ -132,6 +137,8 @@ void initializeVelocityMode(RS03Motor& motor);
 void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel);
 bool queryParameter(uint16_t index, float &value, uint8_t motor_id);
 void processCanMessages();
+void runBindModeDisplay();
+String getAllChannelValues();
 
 // Function to update the OLED display with motor feedback
 void updateDisplay() {
@@ -300,6 +307,18 @@ float mapPulseToPosition(int pulseWidth) {
 void setAllPixelsColor(int red, int green, int blue) {
     pixels.setPixelColor(0, pixels.Color(red, green, blue));
     pixels.show();
+}
+
+// Get all channel values as a formatted string
+String getAllChannelValues() {
+    String channelValues = "All Channels: ";
+    for (int i = 0; i < SPEKTRUM_CHANNELS; i++) {
+        channelValues += "Ch" + String(i + 1) + "=" + String(spektrumReader.getChannel(i)) + "us";
+        if (i < SPEKTRUM_CHANNELS - 1) {
+            channelValues += ", ";
+        }
+    }
+    return channelValues;
 }
 
 // Initialize position mode with proper parameters for specified motor
@@ -635,6 +654,83 @@ bool queryParameter(uint16_t index, float &value, uint8_t motor_id) {
     return false;
 }
 
+// Spektrum satellite bind mode display function
+// Note: Bind pulses are sent in setup() before this function is called
+void runBindModeDisplay() {
+    log(LOG_INFO, "Entering bind mode display loop...");
+    
+    // Initialize display for bind mode
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("BIND MODE");
+    display.setTextSize(1);
+    display.setCursor(0, 20);
+    display.println("DSMX 22ms");
+    display.println("");
+    display.println("1. Put TX in bind mode");
+    display.println("2. Power cycle when");
+    display.println("   LED goes solid");
+    display.display();
+    
+    // Set LED to pulsing blue to indicate bind mode
+    setAllPixelsColor(0, 0, 50);
+    
+    log(LOG_INFO, "Spektrum satellite receiver is now in DSMX 22ms bind mode");
+    log(LOG_INFO, "The receiver LED should be flashing rapidly");
+    log(LOG_INFO, "");
+    log(LOG_INFO, "BINDING INSTRUCTIONS:");
+    log(LOG_INFO, "1. Put your transmitter into DSMX bind mode");
+    log(LOG_INFO, "2. Wait for the receiver LED to go solid");
+    log(LOG_INFO, "3. Power cycle both transmitter and receiver");
+    log(LOG_INFO, "4. Remove the bind mode jumper and restart");
+    log(LOG_INFO, "");
+    log(LOG_INFO, "System will remain in bind mode until power cycle...");
+    
+    // Stay in bind mode forever with pulsing LED
+    unsigned long lastPulse = 0;
+    bool ledState = false;
+    
+    while (true) {
+        // Pulse the LED every 500ms to indicate bind mode is active
+        if (millis() - lastPulse >= 500) {
+            ledState = !ledState;
+            if (ledState) {
+                setAllPixelsColor(0, 0, 50); // Blue
+            } else {
+                setAllPixelsColor(0, 0, 10); // Dim blue
+            }
+            lastPulse = millis();
+        }
+        
+        // Update display with elapsed time
+        static unsigned long lastDisplayUpdate = 0;
+        if (millis() - lastDisplayUpdate >= 1000) {
+            unsigned long elapsed = millis() / 1000;
+            
+            display.clearDisplay();
+            display.setTextSize(2);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("BIND MODE");
+            display.setTextSize(1);
+            display.setCursor(0, 20);
+            display.println("DSMX 22ms");
+            display.println("");
+            display.println("Elapsed: " + String(elapsed) + "s");
+            display.println("");
+            display.println("Waiting for bind...");
+            display.println("Power cycle when done");
+            display.display();
+            
+            lastDisplayUpdate = millis();
+        }
+        
+        delay(10);
+    }
+}
+
 // Process incoming CAN messages
 void processCanMessages() {
     // Check for any available CAN messages
@@ -744,6 +840,43 @@ void processCanMessages() {
 // ----- Setup and Main Loop -----
 
 void setup() {
+    // CRITICAL: Check for bind mode FIRST, before any other initialization
+    // Bind mode must happen immediately at power-up
+    pinMode(BIND_MODE_PIN, INPUT_PULLUP);
+    delay(1); // Minimal delay for pin to stabilize
+    
+    if (digitalRead(BIND_MODE_PIN) == LOW && BIND_ENABLED) {
+        // Send bind pulses immediately, before any other initialization
+        // Configure Pin 0 (RX) as output for bind pulses
+        pinMode(SPEKTRUM_RX_PIN, OUTPUT);
+        
+        // Send DSMX 22ms bind pulses immediately
+        digitalWrite(SPEKTRUM_RX_PIN, LOW);   // Pull RX pin low
+        delay(200);                           // Hold for 200ms
+        digitalWrite(SPEKTRUM_RX_PIN, HIGH);  // Release RX pin
+        delay(100);                           // Wait for receiver to enter bind mode
+        
+        // Now initialize minimal hardware for bind mode display
+        Serial.begin(115200);
+        while (!Serial && millis() < 1000); // Shorter timeout in bind mode
+        
+        log(LOG_INFO, "=== SPEKTRUM BIND MODE ACTIVATED ===");
+        log(LOG_INFO, "Bind pulses sent immediately at power-up");
+        
+        pixels.begin();
+        pixels.setBrightness(50);
+        pixels.clear();
+        
+        // Initialize display for bind mode
+        if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+            log(LOG_ERROR, "SSD1306 OLED display initialization failed");
+        }
+        
+        // Enter bind mode display loop (this function never returns)
+        runBindModeDisplay();
+    }
+    
+    // Normal startup continues here if not in bind mode
     // Initialize Serial for debugging
     Serial.begin(115200);
     while (!Serial && millis() < 5000);
@@ -785,11 +918,11 @@ void setup() {
     }
     log(LOG_INFO, "CAN initialized at 1 Mbit/s");
 
-    // Initialize CPPM reader
-    if (cppmReader.begin()) {
-        log(LOG_INFO, "CPPM Reader initialized on pin " + String(CPPM_PIN));
+    // Initialize Spektrum satellite reader
+    if (spektrumReader.begin()) {
+        log(LOG_INFO, "Spektrum Satellite Reader initialized on Serial1");
     } else {
-        log(LOG_ERROR, "Failed to initialize CPPM Reader!");
+        log(LOG_ERROR, "Failed to initialize Spektrum Satellite Reader!");
         setAllPixelsColor(50, 0, 50);
     }
 
@@ -806,7 +939,7 @@ void setup() {
     
     motorsInitialized = true;
     setAllPixelsColor(0, 50, 0); // Green indicates ready
-    log(LOG_INFO, "Setup complete. Ready for CPPM control.");
+    log(LOG_INFO, "Setup complete. Ready for Spektrum control.");
     log(LOG_INFO, "Channel 1 (index 0): 1000us=-20rad/s, 1500us=stop, 2000us=20rad/s");
     log(LOG_INFO, "Channel 2 (index 1): 1000us=1A, 2000us=" + String(MOTOR_CURRENT_LIMIT) + "A current limit (in velocity mode)");
     log(LOG_INFO, "Channel 3 (index 2): >1800us=position mode, <1800us=velocity mode");
@@ -822,7 +955,7 @@ void setup() {
     display.println("System Ready!");
     display.println("");
     display.println("Waiting for");
-    display.println("CPPM control input");
+    display.println("Spektrum control input");
     display.display();
     
     delay(50);
@@ -835,8 +968,8 @@ void loop() {
         firstLoop = false;
     }
     
-    // Update CPPM reader and check if signal is still valid
-    cppmReader.update();
+    // Update Spektrum reader and check if signal is still valid
+            spektrumReader.update();
 
     // Process any incoming CAN messages to update feedback
     // Call multiple times per loop to be more aggressive about capturing feedback
@@ -882,21 +1015,26 @@ void loop() {
     
     // Print all channel values once per second
     if (currentTime - lastChannelPrint >= 1000) {
-        String channelValues = "CPPM Channels: ";
-        for (int i = 0; i < CPPM_CHANNELS; i++) {
-            channelValues += String(i + 1) + "=" + String(cppmReader.getChannel(i)) + "us ";
+        String channelValues = "Spektrum Channels: ";
+                    for (int i = 0; i < SPEKTRUM_CHANNELS; i++) {
+                channelValues += String(i + 1) + "=" + String(spektrumReader.getChannel(i)) + "us ";
         }
         log(LOG_DEBUG, channelValues);
+        
+        // Also print signal status
+        log(LOG_DEBUG, "Signal Status: " + String(spektrumReader.isReceiving() ? "RECEIVING" : "NO SIGNAL") + 
+                       ", Last Frame: " + String(millis() - spektrumReader.lastFrameTime()) + "ms ago");
+        
         lastChannelPrint = currentTime;
     }
 
-    // Handle CPPM control of the motors
+    // Handle Spektrum control of the motors
     if (motorsInitialized) {
         static unsigned long lastDebugPrint = 0;
         unsigned long currentTime = millis();
         
         // Check which motor(s) to control based on SELECT_CHANNEL (Channel 5)
-        int selectChannelValue = cppmReader.getChannel(SELECT_CHANNEL);
+        int selectChannelValue = spektrumReader.getChannel(SELECT_CHANNEL);
         MotorSelection newMotorSelection;
         
         if (selectChannelValue > SELECT_HIGH) {
@@ -920,7 +1058,7 @@ void loop() {
         }
         
         // Check if we need to switch control modes
-        int modeChannelValue = cppmReader.getChannel(MODE_CHANNEL);
+        int modeChannelValue = spektrumReader.getChannel(MODE_CHANNEL);
         bool shouldBeInPositionMode = modeChannelValue > MODE_THRESHOLD;
         
         // Only switch modes if the mode has changed
@@ -938,14 +1076,14 @@ void loop() {
         }
         
         // Check if we need to zero the position
-        int zeroChannelValue = cppmReader.getChannel(ZERO_CHANNEL);
+        int zeroChannelValue = spektrumReader.getChannel(ZERO_CHANNEL);
         
         // Check if we're in a zero hold period and should exit
         if (holdingZeroPosition) {
             // Exit zero hold if either:
             // 1. More than 1 second has passed since we started holding zero, or
             // 2. The desired target position from RC is within ±0.1 rad
-            int positionPulseWidth = cppmReader.getChannel(POS_CHANNEL);
+            int positionPulseWidth = spektrumReader.getChannel(POS_CHANNEL);
             float desiredPosition = mapPulseToPosition(positionPulseWidth);
             
             if ((currentTime - zeroHoldStartTime > 1000) || (fabs(desiredPosition) < 0.1f)) {
@@ -1017,8 +1155,8 @@ void loop() {
         // Update motor at the specified rate
         if (currentTime - lastMotorUpdateTime >= MOTOR_UPDATE_RATE_MS) {
             // If no signal is detected, default to center position (stop/neutral)
-            if (!cppmReader.isReceiving()) {
-                log(LOG_ERROR, "No CPPM signal detected!");
+            if (!spektrumReader.isReceiving()) {
+                log(LOG_ERROR, "No Spektrum signal detected!");
                 // Set motors to safe state
                 motor1.setVelocity(0);
                 motor2.setVelocity(0);
@@ -1026,7 +1164,7 @@ void loop() {
             } else {
                 if (inPositionMode && modeInitialized) {
                     // Position Mode - use channel 4 for position control
-                    int positionPulseWidth = cppmReader.getChannel(POS_CHANNEL);
+                    int positionPulseWidth = spektrumReader.getChannel(POS_CHANNEL);
                     float targetPosition = mapPulseToPosition(positionPulseWidth);
                     
                     // Skip setting new target position if we're holding zero
@@ -1038,6 +1176,7 @@ void loop() {
                     if (currentTime - lastDebugPrint >= DEBUG_PRINT_INTERVAL) {
                         log(LOG_INFO, "Position Mode: RC Pulse: " + String(positionPulseWidth) + 
                                       "us, Target Position: " + String(holdingZeroPosition ? 0.0f : targetPosition) + " rad");
+                        log(LOG_INFO, getAllChannelValues());
                         lastDebugPrint = currentTime;
                     }
                     
@@ -1094,11 +1233,11 @@ void loop() {
                     
                 } else if (!inPositionMode && modeInitialized) {
                     // Velocity Mode - use channel 1 for velocity control
-                    int velocityPulseWidth = cppmReader.getChannel(CPPM_CHANNEL);
+                    int velocityPulseWidth = spektrumReader.getChannel(SPEKTRUM_CHANNEL);
                     float targetVelocity = mapPulseToVelocity(velocityPulseWidth);
                     
                     // Get current limit from channel 2
-                    int currentPulseWidth = cppmReader.getChannel(CURRENT_CHANNEL);
+                    int currentPulseWidth = spektrumReader.getChannel(CURRENT_CHANNEL);
                     float currentLimit = mapPulseToCurrentLimit(currentPulseWidth);
                     
                     // Store the current limit for feedback display
@@ -1109,6 +1248,7 @@ void loop() {
                         log(LOG_INFO, "Velocity Mode: RC Pulse: " + String(velocityPulseWidth) + 
                                       "us, Velocity: " + String(targetVelocity) + " rad/s, " +
                                       "Current Limit: " + String(currentLimit) + " A");
+                        log(LOG_INFO, getAllChannelValues());
                         lastDebugPrint = currentTime;
                     }
                     
