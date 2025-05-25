@@ -30,8 +30,9 @@
 #define MAX_PULSE      2000 // 2000us = 20 rad/s
 #define DEAD_ZONE      50   // ±50us dead zone around 1500us
 #define CPPM_CHANNEL   0    // First channel (0-based index) for motor speed control
+#define CURRENT_CHANNEL 1   // Channel 2 (zero-indexed as 1) for current limit control
 #define MODE_CHANNEL   2    // Channel 3 (zero-indexed as 2) for mode control
-#define POS_CHANNEL    3    // Channel 4 (zero-indexed as 3) for position control
+#define POS_CHANNEL    0    // Channel 4 (zero-indexed as 3) for position control
 #define SELECT_CHANNEL 4    // Channel 5 (zero-indexed as 4) for motor selection
 #define ZERO_CHANNEL   5    // Channel 6 (zero-indexed as 5) for position zeroing
 #define CPPM_CHANNELS  8    // Total number of CPPM channels
@@ -44,7 +45,7 @@
                             // Between 1300-1800 = both motors, motor 2 reversed
 
 // ----- Motor Configuration -----
-#define MOTOR_CURRENT_LIMIT 0.5f   // Current limit in amperes
+#define MOTOR_CURRENT_LIMIT 40.0f   // Current limit in amperes
 #define MOTOR_ACCELERATION  200.0f  // Acceleration limit in rad/s² for velocity mode
 #define POSITION_SPEED_LIMIT 25.0f  // Speed limit for position mode in rad/s
 #define POSITION_ACCELERATION 200.0f // Acceleration limit in rad/s² for position mode
@@ -98,6 +99,8 @@ struct MotorRawFeedback {
     float velocity = 0.0f;
     float torque = 0.0f;
     float temperature = 0.0f;
+    float current = 0.0f;
+    float currentLimit = 0.0f;
     bool received = false;
     unsigned long timestamp = 0;
 };
@@ -105,6 +108,9 @@ struct MotorRawFeedback {
 // Global variables to store raw feedback for each motor
 MotorRawFeedback motor1_feedback;
 MotorRawFeedback motor2_feedback;
+
+// Track current RC-controlled current limit
+float rcCurrentLimit = MOTOR_CURRENT_LIMIT;
 
 // Motor selection enum for clarity
 enum MotorSelection {
@@ -169,9 +175,9 @@ void updateDisplay() {
     display.print("Vel:");
     
     display.setCursor(0, 48);
-    display.print("Trq:");
+    display.print("Cur:");
     display.setCursor(75, 48);
-    display.print("Trq:");
+    display.print("Cur:");
     
     // Display Motor 1 data values (right-aligned in left column)
     if (motor1_feedback.received) {
@@ -187,11 +193,11 @@ void updateDisplay() {
         display.setCursor(59 - velWidth, 38);
         display.print(velStr);
         
-        // Torque
-        String trqStr = String(motor1_feedback.torque, 2);
-        int trqWidth = trqStr.length() * 6;
-        display.setCursor(59 - trqWidth, 48);
-        display.print(trqStr);
+        // Current
+        String curStr = String(motor1_feedback.current, 2);
+        int curWidth = curStr.length() * 6;
+        display.setCursor(59 - curWidth, 48);
+        display.print(curStr);
     } else {
         display.setCursor(30, 38);
         display.print("NO DATA");
@@ -211,11 +217,11 @@ void updateDisplay() {
         display.setCursor(124 - velWidth, 38);
         display.print(velStr);
         
-        // Torque
-        String trqStr = String(motor2_feedback.torque, 2);
-        int trqWidth = trqStr.length() * 6;
-        display.setCursor(124 - trqWidth, 48);
-        display.print(trqStr);
+        // Current
+        String curStr = String(motor2_feedback.current, 2);
+        int curWidth = curStr.length() * 6;
+        display.setCursor(124 - curWidth, 48);
+        display.print(curStr);
     } else {
         display.setCursor(95, 38);
         display.print("NO DATA");
@@ -265,6 +271,22 @@ float mapPulseToVelocity(int pulseWidth) {
     } else {
         // Map 1550-2000us to 0-MAX_VELOCITY rad/s
         return map(pulseWidth, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, MAX_VELOCITY) * 1.0f;
+    }
+}
+
+// Map RC pulse width to current limit
+float mapPulseToCurrentLimit(int pulseWidth) {
+    // Map pulse width from 1000-2000us to 0-MOTOR_CURRENT_LIMIT
+    // Linear mapping with minimum 0.0A as a safety measure
+    const float MIN_CURRENT = 0.0f; // Minimum current limit even at 1000us
+    
+    if (pulseWidth <= MIN_PULSE) {
+        return MIN_CURRENT;
+    } else if (pulseWidth >= MAX_PULSE) {
+        return MOTOR_CURRENT_LIMIT;
+    } else {
+        return MIN_CURRENT + (MOTOR_CURRENT_LIMIT - MIN_CURRENT) * 
+               (pulseWidth - MIN_PULSE) / (MAX_PULSE - MIN_PULSE);
     }
 }
 
@@ -465,6 +487,22 @@ void fetchAndReportMotorFeedback(RS03Motor& motor, const String& motorLabel) {
     if (queryParameter(INDEX_CURRENT, current, motorId)) {
         success = true;
         log(LOG_DEBUG, "Direct current query success for " + motorLabel + ": " + String(current));
+        
+        // Store in feedback structure
+        if (rawFeedback) {
+            rawFeedback->current = current;
+        }
+    }
+    
+    // Query current limit (index 0x7022)
+    float currentLimit = 0.0f;
+    if (queryParameter(0x7022, currentLimit, motorId)) {
+        log(LOG_DEBUG, "Direct current limit query success for " + motorLabel + ": " + String(currentLimit));
+        
+        // Store in feedback structure
+        if (rawFeedback) {
+            rawFeedback->currentLimit = currentLimit;
+        }
     }
     
     // If we don't have raw feedback, query all remaining parameters directly
@@ -770,6 +808,7 @@ void setup() {
     setAllPixelsColor(0, 50, 0); // Green indicates ready
     log(LOG_INFO, "Setup complete. Ready for CPPM control.");
     log(LOG_INFO, "Channel 1 (index 0): 1000us=-20rad/s, 1500us=stop, 2000us=20rad/s");
+    log(LOG_INFO, "Channel 2 (index 1): 1000us=1A, 2000us=" + String(MOTOR_CURRENT_LIMIT) + "A current limit (in velocity mode)");
     log(LOG_INFO, "Channel 3 (index 2): >1800us=position mode, <1800us=velocity mode");
     log(LOG_INFO, "Channel 4 (index 3): 1000us=-4rad, 2000us=+4rad (in position mode)");
     log(LOG_INFO, "Channel 5 (index 4): >1800us=motor 1, <1300us=motor 2, 1300-1800us=both (motor 2 reversed)");
@@ -1058,10 +1097,18 @@ void loop() {
                     int velocityPulseWidth = cppmReader.getChannel(CPPM_CHANNEL);
                     float targetVelocity = mapPulseToVelocity(velocityPulseWidth);
                     
+                    // Get current limit from channel 2
+                    int currentPulseWidth = cppmReader.getChannel(CURRENT_CHANNEL);
+                    float currentLimit = mapPulseToCurrentLimit(currentPulseWidth);
+                    
+                    // Store the current limit for feedback display
+                    rcCurrentLimit = currentLimit;
+                    
                     // Print debug info occasionally
                     if (currentTime - lastDebugPrint >= DEBUG_PRINT_INTERVAL) {
                         log(LOG_INFO, "Velocity Mode: RC Pulse: " + String(velocityPulseWidth) + 
-                                      "us, Velocity: " + String(targetVelocity) + " rad/s");
+                                      "us, Velocity: " + String(targetVelocity) + " rad/s, " +
+                                      "Current Limit: " + String(currentLimit) + " A");
                         lastDebugPrint = currentTime;
                     }
                     
@@ -1070,7 +1117,7 @@ void loop() {
                     
                     // Set velocity for the appropriate motor(s)
                     if (currentMotorSelection == MOTOR_1_ONLY || currentMotorSelection == BOTH_MOTORS) {
-                        if (!motor1.setVelocityWithLimits(targetVelocity, MOTOR_CURRENT_LIMIT, MOTOR_ACCELERATION)) {
+                        if (!motor1.setVelocityWithLimits(targetVelocity, currentLimit, MOTOR_ACCELERATION)) {
                             log(LOG_ERROR, "Failed to set velocity for motor 1!");
                             success = false;
                         }
@@ -1085,7 +1132,7 @@ void loop() {
                             motor2Velocity = -targetVelocity;
                         }
                         
-                        if (!motor2.setVelocityWithLimits(motor2Velocity, MOTOR_CURRENT_LIMIT, MOTOR_ACCELERATION)) {
+                        if (!motor2.setVelocityWithLimits(motor2Velocity, currentLimit, MOTOR_ACCELERATION)) {
                             log(LOG_ERROR, "Failed to set velocity for motor 2!");
                             success = false;
                         }
