@@ -1,18 +1,10 @@
-#include "rs03_motor.h"
+#include "RS03Motor.h"
+#include "Logger.h"
 #include <Arduino.h> // Include for Serial object
 #include <cmath>   // For std::isnan, std::isinf, round. Not for clamp.
 #include <cstring> // For memcpy
 #include <algorithm> // For std::min and std::max, if available and used instead of manual clamp
 #include <string>
-
-// ----- Debug Levels -----
-#define LOG_ERROR   1
-#define LOG_INFO    2
-#define LOG_DEBUG   3
-#define LOG_VERBOSE 4
-
-// Forward declaration - this function is defined in main.cpp
-extern void log(int level, const String& message);
 
 // Helper function for printing frames
 void print_frame_details(const char* label, const CanFrame& frame) {
@@ -31,7 +23,7 @@ void print_frame_details(const char* label, const CanFrame& frame) {
         }
         frameDetails += "]";
         
-        log(LOG_DEBUG, frameDetails);
+        Logger::debug(frameDetails);
     }
 }
 
