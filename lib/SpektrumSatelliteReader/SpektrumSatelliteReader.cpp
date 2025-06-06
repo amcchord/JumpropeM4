@@ -336,4 +336,22 @@ SpektrumSatelliteReader::SwitchStates SpektrumSatelliteReader::getSwitchStatesFr
     }
     
     return states;
+}
+
+SpektrumSatelliteReader::Channel8State SpektrumSatelliteReader::getChannel8State() const {
+    int ch8Value = getChannel(7);  // Channel 8 is 0-based index 7
+    
+    // Define thresholds for three-way switch (80% detection)
+    int lowThreshold = _minValue + (int)(0.2f * (_defaultValue - _minValue));   // 1100us for 1000-1500-2000 range
+    int highThreshold = _defaultValue + (int)(0.8f * (_maxValue - _defaultValue)); // 1900us for 1000-1500-2000 range
+    
+    if (ch8Value <= lowThreshold) {
+        return CH8_LOW;
+    } else if (ch8Value >= highThreshold) {
+        return CH8_HIGH;
+    } else if (ch8Value >= (lowThreshold + 50) && ch8Value <= (highThreshold - 50)) {
+        return CH8_MIDDLE;  // Add some hysteresis to avoid flutter
+    }
+    
+    return CH8_UNKNOWN;
 } 

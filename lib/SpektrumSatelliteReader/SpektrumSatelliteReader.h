@@ -47,6 +47,15 @@ public:
     };
     SwitchStates getSwitchStatesFromChannel6() const;
     
+    // Decode Channel 8 state (0-based index 7)
+    enum Channel8State {
+        CH8_LOW,      // Low position
+        CH8_MIDDLE,   // Middle position
+        CH8_HIGH,     // High position
+        CH8_UNKNOWN   // Unknown/invalid state
+    };
+    Channel8State getChannel8State() const;
+    
     // Get frame statistics for debugging
     struct FrameStats {
         unsigned long totalFrames;
