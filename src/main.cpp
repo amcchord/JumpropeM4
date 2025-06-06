@@ -316,14 +316,14 @@ void setup() {
         Serial.println("Control Scheme:");
         Serial.println("  Channel 4 Mode 1 = Velocity Mode");
         Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control, Ch5 nudges zero ±0.2rad)");
-        Serial.println("  Channel 4 Mode 3 = Position Mode (Channel 5 control, base=1.9rad)");
+        Serial.println("  Channel 4 Mode 3 = Position Mode (SwA=-0.1rad, SwB=3.9rad, Ch5=1.9±2π rad)");
         Serial.println("  Channel 4 Mode 4 = Position Mode (Fixed: M1=-4.4rad, M2=-0.6rad)");
         Serial.println("  Channel 4 Mode 5 = Position Mode (Individual motor control)");
         Serial.println("  Channel 4 Mode 6 = Emergency Stop and Clear Errors");
-        Serial.println("  Switch A = Set mechanical zero");
-        Serial.println("  Channel 5 = Velocity control (Mode 1), Zero nudging (Mode 2), or Position offset ±2π (Mode 3)");
+        Serial.println("  Switch A = Set mechanical zero (Mode 6), or Position -0.1rad (Mode 3)");
+        Serial.println("  Channel 5 = Velocity control (Mode 1), Zero nudging (Mode 2), or Position 1.9±2π rad (Mode 3, no switches)");
         Serial.println("  Channel 7 = Motor 1 position ±7rad (Mode 5 only)");
-        Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2 only)");
+        Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2), or Position 3.9rad (Mode 3)");
         Serial.println("  Channel 9 = Motor 2 position ±7rad (Mode 5 only)");
         Serial.println("  Channel 8 = State tracking only (Low/Middle/High)");
         Serial.println("  Motor 1 is REVERSED by default");
@@ -646,23 +646,32 @@ void loop() {
                         currentTargetPosition = nudgeableZeroPosition;  // Switch B OFF = nudgeable zero position
                     }
                 } else if (mode == 3) {
-                    // Mode 3: Position mode - use Channel 5 to control position around 1.9 rad base with ±2π range
-                    float basePosition = 1.9f;
-                    float maxOffset = 2.0f * PI;  // ±2π radians
+                    // Mode 3: Position mode - Switch A = -0.1 rad, Switch B = 3.9 rad, or Channel 5 control
                     
-                    // Map Channel 5 from pulse range to position offset
-                    float positionOffset = 0.0f;
-                    if (ch5Value >= (MID_PULSE - DEAD_ZONE) && ch5Value <= (MID_PULSE + DEAD_ZONE)) {
-                        positionOffset = 0.0f;  // Dead zone - no offset from base position
-                    } else if (ch5Value < MID_PULSE) {
-                        // Map lower half to negative offset
-                        positionOffset = map(ch5Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -maxOffset * 1000, 0) * 0.001f;
+                    // Check for switch overrides first
+                    if (switches.switchA) {
+                        currentTargetPosition = -0.1f;  // Switch A = -0.1 radians
+                    } else if (switches.switchB) {
+                        currentTargetPosition = 3.9f;   // Switch B = 3.9 radians
                     } else {
-                        // Map upper half to positive offset
-                        positionOffset = map(ch5Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, maxOffset * 1000) * 0.001f;
+                        // No switches pressed - use Channel 5 to control position around 1.9 rad base with ±2π range
+                        float basePosition = 1.9f;
+                        float maxOffset = 2.0f * PI;  // ±2π radians
+                        
+                        // Map Channel 5 from pulse range to position offset
+                        float positionOffset = 0.0f;
+                        if (ch5Value >= (MID_PULSE - DEAD_ZONE) && ch5Value <= (MID_PULSE + DEAD_ZONE)) {
+                            positionOffset = 0.0f;  // Dead zone - no offset from base position
+                        } else if (ch5Value < MID_PULSE) {
+                            // Map lower half to negative offset
+                            positionOffset = map(ch5Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -maxOffset * 1000, 0) * 0.001f;
+                        } else {
+                            // Map upper half to positive offset
+                            positionOffset = map(ch5Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, maxOffset * 1000) * 0.001f;
+                        }
+                        
+                        currentTargetPosition = basePosition + positionOffset;
                     }
-                    
-                    currentTargetPosition = basePosition + positionOffset;
                 } else if (mode == 4) {
                     // Mode 4: Position mode - fixed positions (M1=-4.4rad, M2=-0.6rad)
                     currentTargetPosition = 0.0f;  // Not used in Mode 4, individual targets are used

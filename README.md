@@ -41,12 +41,12 @@ The system supports 6 distinct control modes selected via Channel 4:
 
 | Mode | Name | Description | Primary Control | Secondary Control |
 |------|------|-------------|-----------------|-------------------|
-| 1 | Velocity Mode | Direct velocity control of both motors | Channel 5 (±20 rad/s) | Switch A (Zero) |
-| 2 | Position Mode (Switch) | Binary position control | Switch B (0 or 3.8 rad) | Switch A (Zero) |
-| 3 | Position Mode (Analog) | Analog position control around base | Channel 5 (±2π around 1.9 rad) | Switch A (Zero) |
-| 4 | Position Mode (Fixed) | Fixed position targets | Automatic (M1=-4.4, M2=-0.6 rad) | Switch A (Zero) |
-| 5 | Position Mode (Individual) | Independent motor control | Ch7 (M1 ±7 rad), Ch9 (M2 ±7 rad) | Switch A (Zero) |
-| 6 | Emergency Stop | Stop motors and clear errors | Automatic stop and fault reset | N/A |
+| 1 | Velocity Mode | Direct velocity control of both motors | Channel 5 (±20 rad/s) | N/A |
+| 2 | Position Mode (Switch) | Binary position control with zero nudging | Switch B (0 or 3.8 rad) | Ch5 (Zero nudge ±0.2 rad) |
+| 3 | Position Mode (Analog) | Analog position control around base | Channel 5 (±2π around 1.9 rad) | N/A |
+| 4 | Position Mode (Fixed) | Fixed position targets | Automatic (M1=-4.4, M2=-0.6 rad) | N/A |
+| 5 | Position Mode (Individual) | Independent motor control | Ch7 (M1 ±7 rad), Ch9 (M2 ±7 rad) | N/A |
+| 6 | Emergency Stop | Stop motors and clear errors | Automatic stop and fault reset | Switch A (Zero) |
 
 ## Channel Mapping
 
@@ -55,8 +55,8 @@ The system supports 6 distinct control modes selected via Channel 4:
 | Channel | Function | Range/Values | Used In Modes | Description |
 |---------|----------|--------------|---------------|-------------|
 | 4 | Mode Selection | 1-6 | All | Selects operating mode |
-| 5 | Velocity/Position | 1000-2000μs | 1, 3 | Velocity control (Mode 1) or position offset (Mode 3) |
-| 6 | Switch States | Switch A/B | All | Switch A: Zero setting, Switch B: Binary position |
+| 5 | Velocity/Position/Nudge | 1000-2000μs | 1, 2, 3 | Velocity control (Mode 1), zero nudging (Mode 2), or position offset (Mode 3) |
+| 6 | Switch States | Switch A/B | All | Switch A: Zero setting (Mode 6 only), Switch B: Binary position (Mode 2) |
 | 7 | Motor 1 Position | 1000-2000μs | 5 | Individual Motor 1 position control (±7 rad) |
 | 8 | State Tracking | Low/Mid/High | All | Channel 8 state monitoring (display only) |
 | 9 | Motor 2 Position | 1000-2000μs | 5 | Individual Motor 2 position control (±7 rad) |
@@ -65,8 +65,8 @@ The system supports 6 distinct control modes selected via Channel 4:
 
 | Switch | Function | Action | Available In |
 |--------|----------|--------|--------------|
-| Switch A | Mechanical Zero | Rising edge sets current position as zero | All modes |
-| Switch B | Binary Position | OFF=0 rad, ON=3.8 rad | Mode 2 only |
+| Switch A | Mechanical Zero | Rising edge sets current position as zero and resets nudgeable zero | Mode 6 only |
+| Switch B | Binary Position | OFF=0 rad, ON=3.8 rad (affected by zero nudging) | Mode 2 only |
 
 ## Detailed Mode Operation
 
@@ -76,11 +76,14 @@ The system supports 6 distinct control modes selected via Channel 4:
 - **Direction**: Motor 1 reversed, Motor 2 normal
 - **Use Case**: Direct speed control for synchronized movement
 
-### Mode 2: Position Control (Switch B)
-- **Control**: Switch B provides binary position control  
-- **Positions**: Switch OFF = 0 radians, Switch ON = 3.8 radians
-- **Motors**: Both motors move to same target position
-- **Use Case**: Simple two-position operation
+### Mode 2: Position Control (Switch B + Zero Nudging)
+- **Control**: Switch B provides binary position control with adjustable zero offset
+- **Positions**: Switch OFF = nudgeable zero position, Switch ON = 3.8 rad - nudgeable zero
+- **Zero Nudging**: Channel 5 above 65% or below 35% nudges zero position by ±0.01 rad every 100ms
+- **Nudge Range**: ±0.2 radians maximum offset from true zero
+- **Motors**: Both motors move to same target position (affected by zero offset)
+- **Display**: Shows current nudgeable zero offset (Z: value)
+- **Use Case**: Two-position operation with fine zero adjustment capability
 
 ### Mode 3: Position Control (Channel 5)
 - **Control**: Channel 5 provides analog position control
@@ -104,8 +107,9 @@ The system supports 6 distinct control modes selected via Channel 4:
 ### Mode 6: Emergency Stop
 - **Function**: Immediately stops both motors and clears all faults
 - **Operation**: Automatic every 2 seconds while in mode
+- **Zero Setting**: Switch A sets mechanical zero position and resets nudgeable zero (only works in this mode)
 - **Recovery**: Motors re-enabled when exiting mode
-- **Use Case**: Emergency situations and error recovery
+- **Use Case**: Emergency situations, error recovery, and mechanical zero calibration
 
 ## Motor Configuration
 
@@ -132,7 +136,7 @@ The 128x64 OLED display shows:
 - **Line 2**: Current mode (VEL(1), POS(2), POS(3), FIX(4), IND(5), STOP(6))
 - **Line 3**: Motor 1 desired position/velocity with units
 - **Line 4**: Motor 2 desired position/velocity with units  
-- **Line 5**: Switch states (Button A: ON/OFF, Button B: ON/OFF)
+- **Line 5**: Switch states (Button A: ON/OFF, Button B: ON/OFF) + Zero nudge offset in Mode 2
 
 ## Serial Output
 
@@ -156,7 +160,12 @@ Key parameters defined in the firmware:
   - Display updates: Every 150ms
   - Serial output: Every 100ms
   - CAN feedback: Continuous processing
+  - Zero nudging: 0.01 rad every 100ms when triggered
 - **Dead Zones**: ±50μs around channel center positions
+- **Zero Nudging**: 
+  - Trigger thresholds: Channel 5 > 65% or < 35%
+  - Nudge amount: ±0.01 radians per 100ms
+  - Maximum range: ±0.2 radians from true zero
 
 ## Building and Flashing
 
