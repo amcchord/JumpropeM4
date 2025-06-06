@@ -315,13 +315,13 @@ void setup() {
         Serial.println("FIXED: Zero flag set to 1 for -π to π position range");
         Serial.println("Control Scheme:");
         Serial.println("  Channel 4 Mode 1 = Velocity Mode");
-        Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control)");
+        Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control, Ch5 nudges zero ±0.2rad)");
         Serial.println("  Channel 4 Mode 3 = Position Mode (Channel 5 control, base=1.9rad)");
         Serial.println("  Channel 4 Mode 4 = Position Mode (Fixed: M1=-4.4rad, M2=-0.6rad)");
         Serial.println("  Channel 4 Mode 5 = Position Mode (Individual motor control)");
         Serial.println("  Channel 4 Mode 6 = Emergency Stop and Clear Errors");
         Serial.println("  Switch A = Set mechanical zero");
-        Serial.println("  Channel 5 = Velocity control (Mode 1) or Position offset ±2π (Mode 3)");
+        Serial.println("  Channel 5 = Velocity control (Mode 1), Zero nudging (Mode 2), or Position offset ±2π (Mode 3)");
         Serial.println("  Channel 7 = Motor 1 position ±7rad (Mode 5 only)");
         Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2 only)");
         Serial.println("  Channel 9 = Motor 2 position ±7rad (Mode 5 only)");
@@ -335,6 +335,9 @@ void setup() {
 static bool inPositionMode = false;
 static bool modeInitialized = false;
 static float currentTargetPosition = 0.0f;
+static float nudgeableZeroPosition = 0.0f;  // Adjustable zero position (±0.2 rad max)
+static unsigned long lastNudgeTime = 0;
+static bool wasNudging = false;
 
 // ----- Main Loop -----
 void loop() {
@@ -581,14 +584,15 @@ void loop() {
             delay(100);  // Give time for mode change
         }
         
-        // Handle zero position command using Switch A
+        // Handle zero position command using Switch A (only in Mode 6)
         static bool lastSwitchAState = false;
-        if (switches.switchA && !lastSwitchAState) {
-            // Rising edge detection - switch just turned ON
-            Logger::info("Switch A pressed - Setting mechanical zero position");
+        if (switches.switchA && !lastSwitchAState && mode == 6) {
+            // Rising edge detection - switch just turned ON, and we're in Mode 6
+            Logger::info("Switch A pressed in Mode 6 - Setting mechanical zero position and resetting nudgeable zero");
             motor1.setMechanicalZero();
             motor2.setMechanicalZero();
             currentTargetPosition = 0.0f;
+            nudgeableZeroPosition = 0.0f;  // Reset the nudgeable zero position
         }
         lastSwitchAState = switches.switchA;
         
@@ -596,11 +600,50 @@ void loop() {
         if (modeInitialized && mode != 6) {
             if (inPositionMode) {
                 if (mode == 2) {
-                    // Mode 2: Position mode - use Switch B to control position (0 or 3.8 radians)
-                    if (switches.switchB) {
-                        currentTargetPosition = 3.8f;  // Switch B ON = 3.8 radians
+                    // Mode 2: Position mode - use Switch B to control position (nudgeable zero or 3.8 radians)
+                    // Use Channel 5 to nudge the zero position
+                    
+                    // Calculate Channel 5 percentage (0-100%)
+                    float ch5Percentage = (float)(ch5Value - MIN_PULSE) / (MAX_PULSE - MIN_PULSE) * 100.0f;
+                    
+                    // Check if we should nudge (above 65% or below 35%)
+                    bool shouldNudgeUp = (ch5Percentage > 65.0f);
+                    bool shouldNudgeDown = (ch5Percentage < 35.0f);
+                    bool shouldNudge = shouldNudgeUp || shouldNudgeDown;
+                    
+                    // Handle nudging timing
+                    unsigned long currentTime = millis();
+                    if (shouldNudge) {
+                        if (!wasNudging) {
+                            // Just started nudging - record the time
+                            lastNudgeTime = currentTime;
+                            wasNudging = true;
+                        } else if (currentTime - lastNudgeTime >= 100) {
+                            // We've been nudging for 100ms - apply the nudge
+                            float nudgeAmount = 0.01f;
+                            if (shouldNudgeDown) {
+                                nudgeAmount = -0.01f;
+                            }
+                            
+                            // Apply nudge with limits (±0.2 radians)
+                            float newZeroPosition = nudgeableZeroPosition + nudgeAmount;
+                            if (newZeroPosition >= -0.2f && newZeroPosition <= 0.2f) {
+                                nudgeableZeroPosition = newZeroPosition;
+                                Logger::info("Nudged zero position to " + String(nudgeableZeroPosition, 3) + " rad");
+                            }
+                            
+                            // Reset timing for next nudge
+                            lastNudgeTime = currentTime;
+                        }
                     } else {
-                        currentTargetPosition = 0.0f;  // Switch B OFF = 0 radians
+                        wasNudging = false;
+                    }
+                    
+                    // Set target position based on Switch B, offset by nudgeable zero
+                    if (switches.switchB) {
+                        currentTargetPosition = 3.8f - nudgeableZeroPosition;  // Switch B ON = 3.8 radians + offset
+                    } else {
+                        currentTargetPosition = nudgeableZeroPosition;  // Switch B OFF = nudgeable zero position
                     }
                 } else if (mode == 3) {
                     // Mode 3: Position mode - use Channel 5 to control position around 1.9 rad base with ±2π range
@@ -800,7 +843,14 @@ void loop() {
         display.print("Btn A: ");
         display.print(switches.switchA ? "ON" : "OFF");
         display.print("  B: ");
-        display.println(switches.switchB ? "ON" : "OFF");
+        display.print(switches.switchB ? "ON" : "OFF");
+        
+        // Show nudgeable zero position in Mode 2
+        if (mode == 2) {
+            display.print(" Z:");
+            display.print(nudgeableZeroPosition, 2);
+        }
+        display.println();
         
         display.display();
         lastUpdate = millis();
@@ -908,6 +958,13 @@ void loop() {
         Serial.print(switches.switchA ? "ON" : "OFF");
         Serial.print("  BtnB:");
         Serial.print(switches.switchB ? "ON" : "OFF");
+        
+        // Show nudgeable zero position in Mode 2
+        if (mode == 2) {
+            Serial.print("  Zero:");
+            Serial.print(nudgeableZeroPosition, 3);
+            Serial.print("rad");
+        }
         
         Serial.println();
         lastSerialPrint = millis();
