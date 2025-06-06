@@ -317,12 +317,17 @@ void setup() {
         Serial.println("  Channel 4 Mode 1 = Velocity Mode");
         Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control)");
         Serial.println("  Channel 4 Mode 3 = Position Mode (Channel 5 control, base=1.9rad)");
+        Serial.println("  Channel 4 Mode 4 = Position Mode (Fixed: M1=-4.4rad, M2=-0.6rad)");
+        Serial.println("  Channel 4 Mode 5 = Position Mode (Individual motor control)");
+        Serial.println("  Channel 4 Mode 6 = Emergency Stop and Clear Errors");
         Serial.println("  Switch A = Set mechanical zero");
         Serial.println("  Channel 5 = Velocity control (Mode 1) or Position offset ±2π (Mode 3)");
+        Serial.println("  Channel 7 = Motor 1 position ±7rad (Mode 5 only)");
         Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2 only)");
+        Serial.println("  Channel 9 = Motor 2 position ±7rad (Mode 5 only)");
         Serial.println("  Channel 8 = State tracking only (Low/Middle/High)");
         Serial.println("  Motor 1 is REVERSED by default");
-        Serial.println("Ch1  Ch2  Ch3  MODE  Control_Mode  Target/Velocity  M1_Pos  M2_Pos  Switches  Ch8State");
+        Serial.println("Mode  M1_Desired  M2_Desired  ButtonA  ButtonB");
     }
 }
 
@@ -408,10 +413,11 @@ void loop() {
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             display.setCursor(0, 0);
-            display.println("RC Channel Reader");
-            display.println("");
-            display.println("NO SIGNAL");
-            display.println("Check RC connection");
+            display.println("Motor Control");
+            display.println("Mode: NO SIGNAL");
+            display.println("M1 Des: STOP");
+            display.println("M2 Des: STOP");
+            display.println("Btn A: ---  B: ---");
             display.display();
             lastUpdate = millis();
         }
@@ -434,9 +440,11 @@ void loop() {
             display.setTextSize(1);
             display.setTextColor(SSD1306_WHITE);
             display.setCursor(0, 0);
-            display.println("RC Not Available");
-            display.println("Motors Disabled");
-            display.println("Check RC connection");
+            display.println("Motor Control");
+            display.println("Mode: NO RC");
+            display.println("M1 Des: STOP");
+            display.println("M2 Des: STOP");
+            display.println("Btn A: ---  B: ---");
             display.display();
             lastUpdate = millis();
         }
@@ -454,12 +462,7 @@ void loop() {
     pixels.setPixelColor(0, pixels.Color(0, 50, 0)); // Green
     pixels.show();
     
-    // Read all channels (up to 12)
-    int numChannelsToShow = min(12, spektrumReader.getChannelCount());
-    int channels[12];
-    for (int i = 0; i < numChannelsToShow; i++) {
-        channels[i] = spektrumReader.getChannel(i);
-    }
+    // We only need specific channels for control, not display
     
     // Get decoded special channels (needed for display and motor control)
     int mode = 0;
@@ -472,10 +475,12 @@ void loop() {
         ch8State = spektrumReader.getChannel8State();  // Channel 8 state tracking
     }
     
-    // Motor control logic (every 20ms) - only if motors are ready
-    if (motorsReady && millis() - lastMotorUpdate >= 20) {
-        // Get RC channel values
-        int ch5Value = spektrumReader.getChannel(4);  // Channel 5 for velocity control (0-indexed as 4)
+            // Motor control logic (every 20ms) - only if motors are ready
+        if (motorsReady && millis() - lastMotorUpdate >= 20) {
+            // Get RC channel values
+            int ch5Value = spektrumReader.getChannel(4);  // Channel 5 for velocity control (0-indexed as 4)
+            int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1 control (0-indexed as 6)
+            int ch9Value = spektrumReader.getChannel(8);  // Channel 9 for Motor 2 control (0-indexed as 8)
         
         // Motor 1 is reversed by default
         bool motor1Reversed = true;
@@ -483,11 +488,62 @@ void loop() {
         
         // Determine control mode based on Channel 4 mode
         // Mode 1 = Velocity Mode, Mode 2 = Position Mode (Switch B), Mode 3 = Position Mode (Channel 5)
-        bool shouldBeInPositionMode = (mode == 2 || mode == 3);
+        // Mode 4 = Position Mode (Fixed positions: M1=-4.4rad, M2=-0.6rad)
+        // Mode 5 = Position Mode (Individual motor control - Ch7 for M1, Ch9 for M2)
+        // Mode 6 = Emergency Stop and Clear Errors
+        bool shouldBeInPositionMode = (mode == 2 || mode == 3 || mode == 4 || mode == 5);
+        
+        // Handle Mode 6 - Emergency Stop and Clear Errors
+        static bool mode6Executed = false;
+        static int lastMode6Time = 0;
+        static bool wasInMode6 = false;
+        
+        if (mode == 6) {
+            // Execute Mode 6 actions only once per mode entry or every 2 seconds while in mode
+            if (!mode6Executed || (millis() - lastMode6Time > 2000)) {
+                Logger::info("Mode 6: Clearing errors and stopping motors");
+                
+                // Clear all motor faults
+                motor1.resetFaults();
+                motor2.resetFaults();
+                delay(100);
+                
+                // Stop motors by setting velocity to 0
+                motor1.setModeVelocity();
+                motor2.setModeVelocity();
+                delay(100);
+                motor1.setVelocity(0.0f);
+                motor2.setVelocity(0.0f);
+                
+                mode6Executed = true;
+                lastMode6Time = millis();
+                Logger::info("Motors stopped and errors cleared");
+            }
+            wasInMode6 = true;
+        } else {
+            // Reset Mode 6 execution flag when exiting Mode 6
+            if (wasInMode6) {
+                Logger::info("Exiting Mode 6 - preparing for normal operation");
+                
+                // Re-enable motors and clear any remaining faults
+                motor1.resetFaults();
+                motor2.resetFaults();
+                delay(100);
+                motor1.enable();
+                motor2.enable();
+                delay(100);
+                
+                mode6Executed = false;
+                modeInitialized = false;  // Force re-initialization of the new mode
+                wasInMode6 = false;
+                
+                Logger::info("Motors re-enabled and ready for mode transition");
+            }
+        }
         
         // Switch modes if needed or if switching between different position modes
         static int lastMode = 0;
-        if (shouldBeInPositionMode != inPositionMode || mode != lastMode) {
+        if ((shouldBeInPositionMode != inPositionMode || mode != lastMode) && mode != 6) {
             inPositionMode = shouldBeInPositionMode;
             modeInitialized = false;
             if (mode == 1) {
@@ -496,12 +552,20 @@ void loop() {
                 Logger::info("Switching to position mode with Switch B control (Mode 2)");
             } else if (mode == 3) {
                 Logger::info("Switching to position mode with Channel 5 control (Mode 3)");
+            } else if (mode == 4) {
+                Logger::info("Switching to position mode with fixed positions (Mode 4)");
+            } else if (mode == 5) {
+                Logger::info("Switching to position mode with individual motor control (Mode 5)");
             }
+        }
+        
+        // Update lastMode for all modes (including Mode 6) to track transitions
+        if (mode != lastMode) {
             lastMode = mode;
         }
         
-        // Initialize mode if needed (always control both motors)
-        if (!modeInitialized) {
+        // Initialize mode if needed (always control both motors) - skip for Mode 6
+        if (!modeInitialized && mode != 6) {
             if (inPositionMode) {
                 // Set position mode for both motors
                 motor1.setModePositionPP(POSITION_SPEED_LIMIT, POSITION_ACCELERATION, MOTOR_CURRENT_LIMIT);
@@ -528,8 +592,8 @@ void loop() {
         }
         lastSwitchAState = switches.switchA;
         
-        // Execute motor commands based on mode
-        if (modeInitialized) {
+        // Execute motor commands based on mode (skip for Mode 6 - motors already stopped)
+        if (modeInitialized && mode != 6) {
             if (inPositionMode) {
                 if (mode == 2) {
                     // Mode 2: Position mode - use Switch B to control position (0 or 3.8 radians)
@@ -556,13 +620,56 @@ void loop() {
                     }
                     
                     currentTargetPosition = basePosition + positionOffset;
+                } else if (mode == 4) {
+                    // Mode 4: Position mode - fixed positions (M1=-4.4rad, M2=-0.6rad)
+                    currentTargetPosition = 0.0f;  // Not used in Mode 4, individual targets are used
+                    
+                    // Send individual position commands to motors with direction control
+                    float motor1TargetPosition = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
+                    float motor2TargetPosition = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+                    motor1.setPosition(motor1TargetPosition);
+                    motor2.setPosition(motor2TargetPosition);
+                } else if (mode == 5) {
+                    // Mode 5: Position mode - use Channel 7 for Motor 1 and Channel 9 for Motor 2 (individual control)
+                    // Map channels from pulse range to -7 to +7 radians
+                    float motor1Position = 0.0f;
+                    float motor2Position = 0.0f;
+                    
+                    // Map Channel 7 to Motor 1 position (-7 to +7 radians)
+                    if (ch7Value >= (MID_PULSE - DEAD_ZONE) && ch7Value <= (MID_PULSE + DEAD_ZONE)) {
+                        motor1Position = 0.0f;  // Dead zone - neutral position
+                    } else if (ch7Value < MID_PULSE) {
+                        motor1Position = map(ch7Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+                    } else {
+                        motor1Position = map(ch7Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
+                    }
+                    
+                    // Map Channel 9 to Motor 2 position (-7 to +7 radians)
+                    if (ch9Value >= (MID_PULSE - DEAD_ZONE) && ch9Value <= (MID_PULSE + DEAD_ZONE)) {
+                        motor2Position = 0.0f;  // Dead zone - neutral position
+                    } else if (ch9Value < MID_PULSE) {
+                        motor2Position = map(ch9Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+                    } else {
+                        motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
+                    }
+                    
+                    // Send individual position commands to motors with direction control
+                    float motor1TargetPosition = motor1Reversed ? -motor1Position : motor1Position;
+                    float motor2TargetPosition = motor2Reversed ? -motor2Position : motor2Position;
+                    motor1.setPosition(motor1TargetPosition);
+                    motor2.setPosition(motor2TargetPosition);
+                    
+                    // Store positions for display (use the actual commanded positions)
+                    currentTargetPosition = 0.0f;  // Not used in Mode 5, individual targets are used
                 }
                 
-                // Send position commands to both motors with direction control
-                float motor1TargetPosition = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
-                float motor2TargetPosition = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
-                motor1.setPosition(motor1TargetPosition);
-                motor2.setPosition(motor2TargetPosition);
+                // Send position commands to both motors with direction control (for modes 2 and 3)
+                if (mode == 2 || mode == 3) {
+                    float motor1TargetPosition = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
+                    float motor2TargetPosition = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
+                    motor1.setPosition(motor1TargetPosition);
+                    motor2.setPosition(motor2TargetPosition);
+                }
                 
             } else {
                 // Mode 1: Velocity mode - use Channel 5 for velocity control with dead zone
@@ -595,97 +702,105 @@ void loop() {
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
         display.setCursor(0, 0);
-        display.print("Motor Control (");
-        display.print(numChannelsToShow);
-        display.println(")");
+        display.println("Motor Control");
         
-        // Show first 3 channels
-        for (int i = 0; i < min(3, numChannelsToShow); i++) {
-            display.print("Ch");
-            display.print(i + 1);
-            display.print(":");
-            display.println(channels[i]);
-        }
-        
-        // Show MODE instead of channel 4
-        if (numChannelsToShow > 3) {
-            display.print("MODE:");
-            if (mode > 0) {
-                display.println(mode);
-            } else {
-                display.println("?");
-            }
-        }
-        
-        // Show current mode based on Channel 4
-        display.print("Mode:");
+        // Show current mode
+        display.print("Mode: ");
         if (mode == 1) {
-            display.print("VEL (1)");
+            display.println("VEL (1)");
         } else if (mode == 2) {
-            display.print("POS (2)");
+            display.println("POS (2)");
         } else if (mode == 3) {
-            display.print("POS (3)");
+            display.println("POS (3)");
+        } else if (mode == 4) {
+            display.println("FIX (4)");
+        } else if (mode == 5) {
+            display.println("IND (5)");
+        } else if (mode == 6) {
+            display.println("STOP (6)");
         } else {
             display.print("? (");
             display.print(mode);
-            display.print(")");
-        }
-        display.println();
-        
-        // Show control source
-        if (mode == 1) {
-            display.println("Ctrl: Channel 5");
-        } else if (mode == 2) {
-            display.println("Ctrl: Switch B");
-        } else if (mode == 3) {
-            display.println("Ctrl: Channel 5");
-        } else {
-            display.println("Ctrl: Unknown");
+            display.println(")");
         }
         
-        // Show target value (position in POS mode, velocity in VEL mode)
-        if (inPositionMode) {
-            display.print("Tgt:");
-            display.print(currentTargetPosition, 1);
-            display.println("rad");
-        } else {
-            display.print("Vel:");
-            display.print(currentTargetPosition, 1);
-            display.println("r/s");
-        }
+        // Calculate individual motor targets (accounting for direction reversal)
+        float motor1Target = 0.0f;
+        float motor2Target = 0.0f;
+        bool motor1Reversed = true;
+        bool motor2Reversed = false;
         
-        // Show actual motor positions (with error handling)
-        float motor1Pos = motor1.getLastFeedback().position;
-        float motor2Pos = motor2.getLastFeedback().position;
-        display.print("M1:");
-        display.print(motor1Pos, 1);
-        display.print(" M2:");
-        display.println(motor2Pos, 1);
-        
-        // Show switch states and direction control
-        if (numChannelsToShow > 5) {
-            display.print("SW A:");
-            display.print(switches.switchA ? "ON " : "OFF");
-            display.print(" B:");
-            display.println(switches.switchB ? "ON" : "OFF");
+        if (mode == 6) {
+            motor1Target = 0.0f;
+            motor2Target = 0.0f;
+        } else if (mode == 4) {
+            // Mode 4: Fixed positions (M1=-4.4rad, M2=-0.6rad)
+            motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
+            motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+        } else if (mode == 5) {
+            // Mode 5: Individual motor control - calculate from channel values
+            int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
+            int ch9Value = spektrumReader.getChannel(8);  // Channel 9 for Motor 2
             
-            // Show Channel 8 state
-            display.print("Ch8: ");
-            switch (ch8State) {
-                case SpektrumSatelliteReader::CH8_LOW:
-                    display.println("Low");
-                    break;
-                case SpektrumSatelliteReader::CH8_MIDDLE:
-                    display.println("Middle");
-                    break;
-                case SpektrumSatelliteReader::CH8_HIGH:
-                    display.println("High");
-                    break;
-                default:
-                    display.println("Unknown");
-                    break;
+            // Map Channel 7 to Motor 1 position
+            float motor1Position = 0.0f;
+            if (ch7Value >= (MID_PULSE - DEAD_ZONE) && ch7Value <= (MID_PULSE + DEAD_ZONE)) {
+                motor1Position = 0.0f;
+            } else if (ch7Value < MID_PULSE) {
+                motor1Position = map(ch7Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+            } else {
+                motor1Position = map(ch7Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
             }
+            
+            // Map Channel 9 to Motor 2 position
+            float motor2Position = 0.0f;
+            if (ch9Value >= (MID_PULSE - DEAD_ZONE) && ch9Value <= (MID_PULSE + DEAD_ZONE)) {
+                motor2Position = 0.0f;
+            } else if (ch9Value < MID_PULSE) {
+                motor2Position = map(ch9Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+            } else {
+                motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
+            }
+            
+            motor1Target = motor1Reversed ? -motor1Position : motor1Position;
+            motor2Target = motor2Reversed ? -motor2Position : motor2Position;
+        } else if (inPositionMode) {
+            motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
+            motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
+        } else {
+            motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
+            motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
         }
+        
+        // Show Motor 1 desired value
+        display.print("M1 Des: ");
+        if (mode == 6) {
+            display.println("STOP");
+        } else if (inPositionMode) {
+            display.print(motor1Target, 1);
+            display.println(" rad");
+        } else {
+            display.print(motor1Target, 1);
+            display.println(" r/s");
+        }
+        
+        // Show Motor 2 desired value
+        display.print("M2 Des: ");
+        if (mode == 6) {
+            display.println("STOP");
+        } else if (inPositionMode) {
+            display.print(motor2Target, 1);
+            display.println(" rad");
+        } else {
+            display.print(motor2Target, 1);
+            display.println(" r/s");
+        }
+        
+        // Show switch states
+        display.print("Btn A: ");
+        display.print(switches.switchA ? "ON" : "OFF");
+        display.print("  B: ");
+        display.println(switches.switchB ? "ON" : "OFF");
         
         display.display();
         lastUpdate = millis();
@@ -693,23 +808,6 @@ void loop() {
     
     // Print to serial console every 100ms (only if serial is available)
     if (Serial && millis() - lastSerialPrint >= 100) {
-        // Print channels 1-3
-        for (int i = 0; i < min(3, numChannelsToShow); i++) {
-            Serial.print(channels[i]);
-            Serial.print("  ");
-        }
-        
-        // Print MODE instead of channel 4
-        if (numChannelsToShow > 3) {
-            Serial.print("MODE:");
-            if (mode > 0) {
-                Serial.print(mode);
-            } else {
-                Serial.print("?");
-            }
-            Serial.print("  ");
-        }
-        
         // Print mode information
         Serial.print("Mode:");
         if (mode == 1) {
@@ -718,6 +816,12 @@ void loop() {
             Serial.print("POS(2)");
         } else if (mode == 3) {
             Serial.print("POS(3)");
+        } else if (mode == 4) {
+            Serial.print("FIX(4)");
+        } else if (mode == 5) {
+            Serial.print("IND(5)");
+        } else if (mode == 6) {
+            Serial.print("STOP(6)");
         } else {
             Serial.print("?(");
             Serial.print(mode);
@@ -725,62 +829,85 @@ void loop() {
         }
         Serial.print("  ");
         
-        // Print target value (position or velocity)
-        if (inPositionMode) {
-            Serial.print("Target:");
-            Serial.print(currentTargetPosition, 1);
-            Serial.print("rad  ");
-        } else {
-            Serial.print("Velocity:");
-            Serial.print(currentTargetPosition, 1);
-            Serial.print("r/s  ");
-        }
+        // Calculate individual motor targets (accounting for direction reversal)
+        float motor1Target = 0.0f;
+        float motor2Target = 0.0f;
+        bool motor1Reversed = true;
+        bool motor2Reversed = false;
         
-        // Get and print actual motor positions
-        float motor1Pos = motor1.getLastFeedback().position;
-        float motor2Pos = motor2.getLastFeedback().position;
-        Serial.print("M1:");
-        Serial.print(motor1Pos, 2);
-        Serial.print("rad  M2:");
-        Serial.print(motor2Pos, 2);
-        Serial.print("rad  ");
-        
-        // Print switch states and direction control
-        if (numChannelsToShow > 5) {
-            Serial.print("A:");
-            Serial.print(switches.switchA ? "ON" : "OFF");
-            Serial.print(",B:");
-            Serial.print(switches.switchB ? "ON" : "OFF");
-            Serial.print("  ");
+        if (mode == 6) {
+            motor1Target = 0.0f;
+            motor2Target = 0.0f;
+        } else if (mode == 4) {
+            // Mode 4: Fixed positions (M1=-4.4rad, M2=-0.6rad)
+            motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
+            motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+        } else if (mode == 5) {
+            // Mode 5: Individual motor control - calculate from channel values
+            int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
+            int ch9Value = spektrumReader.getChannel(8);  // Channel 9 for Motor 2
             
-            // Print Channel 8 state
-            Serial.print("Ch8:");
-            Serial.print(spektrumReader.getChannel(7));
-            Serial.print("(");
-            switch (ch8State) {
-                case SpektrumSatelliteReader::CH8_LOW:
-                    Serial.print("Low");
-                    break;
-                case SpektrumSatelliteReader::CH8_MIDDLE:
-                    Serial.print("Middle");
-                    break;
-                case SpektrumSatelliteReader::CH8_HIGH:
-                    Serial.print("High");
-                    break;
-                default:
-                    Serial.print("Unknown");
-                    break;
+            // Map Channel 7 to Motor 1 position
+            float motor1Position = 0.0f;
+            if (ch7Value >= (MID_PULSE - DEAD_ZONE) && ch7Value <= (MID_PULSE + DEAD_ZONE)) {
+                motor1Position = 0.0f;
+            } else if (ch7Value < MID_PULSE) {
+                motor1Position = map(ch7Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+            } else {
+                motor1Position = map(ch7Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
             }
-            Serial.print(")  ");
+            
+            // Map Channel 9 to Motor 2 position
+            float motor2Position = 0.0f;
+            if (ch9Value >= (MID_PULSE - DEAD_ZONE) && ch9Value <= (MID_PULSE + DEAD_ZONE)) {
+                motor2Position = 0.0f;
+            } else if (ch9Value < MID_PULSE) {
+                motor2Position = map(ch9Value, MIN_PULSE, MID_PULSE - DEAD_ZONE, -7000, 0) * 0.001f;
+            } else {
+                motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
+            }
+            
+            motor1Target = motor1Reversed ? -motor1Position : motor1Position;
+            motor2Target = motor2Reversed ? -motor2Position : motor2Position;
+        } else if (inPositionMode) {
+            motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
+            motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
+        } else {
+            motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
+            motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
         }
         
-        // Print remaining channels
-        for (int i = 6; i < numChannelsToShow; i++) {
-            Serial.print(channels[i]);
-            if (i < numChannelsToShow - 1) {
-                Serial.print("  ");
-            }
+        // Print Motor 1 desired value
+        Serial.print("M1_Des:");
+        if (mode == 6) {
+            Serial.print("STOP");
+        } else if (inPositionMode) {
+            Serial.print(motor1Target, 2);
+            Serial.print("rad");
+        } else {
+            Serial.print(motor1Target, 2);
+            Serial.print("r/s");
         }
+        Serial.print("  ");
+        
+        // Print Motor 2 desired value
+        Serial.print("M2_Des:");
+        if (mode == 6) {
+            Serial.print("STOP");
+        } else if (inPositionMode) {
+            Serial.print(motor2Target, 2);
+            Serial.print("rad");
+        } else {
+            Serial.print(motor2Target, 2);
+            Serial.print("r/s");
+        }
+        Serial.print("  ");
+        
+        // Print button states
+        Serial.print("BtnA:");
+        Serial.print(switches.switchA ? "ON" : "OFF");
+        Serial.print("  BtnB:");
+        Serial.print(switches.switchB ? "ON" : "OFF");
         
         Serial.println();
         lastSerialPrint = millis();
