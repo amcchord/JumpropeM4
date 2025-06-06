@@ -1,11 +1,18 @@
-#include "RS03Motor.h"
-#include <Arduino.h>
-#include "Logger.h"
+#include "rs03_motor.h"
 #include <Arduino.h> // Include for Serial object
 #include <cmath>   // For std::isnan, std::isinf, round. Not for clamp.
 #include <cstring> // For memcpy
 #include <algorithm> // For std::min and std::max, if available and used instead of manual clamp
 #include <string>
+
+// ----- Debug Levels -----
+#define LOG_ERROR   1
+#define LOG_INFO    2
+#define LOG_DEBUG   3
+#define LOG_VERBOSE 4
+
+// Forward declaration - this function is defined in main.cpp
+extern void log(int level, const String& message);
 
 // Helper function for printing frames
 void print_frame_details(const char* label, const CanFrame& frame) {
@@ -24,7 +31,7 @@ void print_frame_details(const char* label, const CanFrame& frame) {
         }
         frameDetails += "]";
         
-        Logger::debug(frameDetails);
+        log(LOG_DEBUG, frameDetails);
     }
 }
 
@@ -130,25 +137,7 @@ bool RS03Motor::setMechanicalZero() {
     std::memset(frame.data, 0, sizeof(frame.data));
     frame.data[0] = 1; // Set to 1 to set mechanical zero
     print_frame_details("SEND setMechZero:", frame);
-    bool success = sendFrame(frame);
-    
-    // After setting mechanical zero, save parameters to flash (Type 22)
-    if (success) {
-        delay(100); // Give time for zero setting to complete
-        CanFrame saveFrame = createFrame(0x16, master_id_, motor_id_); // Type 22
-        saveFrame.dlc = 8;
-        std::memset(saveFrame.data, 0, sizeof(saveFrame.data));
-        print_frame_details("SEND saveParams:", saveFrame);
-        success &= sendFrame(saveFrame);
-    }
-    
-    return success;
-}
-
-bool RS03Motor::setZeroFlag(uint8_t flag) {
-    // Set zero flag bit: 0=0-2π, 1=-π-π
-    print_frame_details(" -> setZeroFlag calls:", CanFrame{});
-    return setParameterUint8(INDEX_ZERO_STA, flag);
+    return sendFrame(frame);
 }
 
 

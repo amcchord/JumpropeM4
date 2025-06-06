@@ -20,13 +20,13 @@ public:
 };
 
 // ----- RS03 Motor Constants -----
-// From the manual's Type 1 frame format
-const float P_MIN = -12.5f;  // rad
-const float P_MAX = 12.5f;   // rad
-const float V_MIN = -20.0f;  // rad/s
-const float V_MAX = 20.0f;   // rad/s
-const float T_MIN = -60.0f;  // Nm
-const float T_MAX = 60.0f;   // Nm
+// UPDATED: From manual firmware 0.0.2.7+ - Type 2 Change Description
+const float P_MIN = -12.57f;  // rad (was -12.5f in older firmware)
+const float P_MAX = 12.57f;   // rad (was 12.5f in older firmware)
+const float V_MIN = -20.0f;   // rad/s
+const float V_MAX = 20.0f;    // rad/s
+const float T_MIN = -60.0f;   // Nm
+const float T_MAX = 60.0f;    // Nm
 const float KP_MIN = 0.0f;
 const float KP_MAX = 500.0f;
 const float KD_MIN = 0.0f;
@@ -36,16 +36,18 @@ const float KD_MAX = 5.0f;
 const uint16_t INDEX_RUN_MODE = 0x7005;
 const uint16_t INDEX_SPD_REF = 0x700A;
 const uint16_t INDEX_LOC_REF = 0x7016;
-const uint16_t INDEX_LIMIT_CUR = 0x7022;
+const uint16_t INDEX_LIMIT_CUR = 0x7018;  // FIXED: Was 0x7022, should be 0x7018
 const uint16_t INDEX_LIMIT_SPD = 0x7017;
-const uint16_t INDEX_VEL_MAX_PP = 0x7081;
-const uint16_t INDEX_ACC_SET_PP = 0x7083;
+const uint16_t INDEX_VEL_MAX_PP = 0x7024; // FIXED: Was 0x7081, should be 0x7024
+const uint16_t INDEX_ACC_SET_PP = 0x7025; // FIXED: Was 0x7083, should be 0x7025
+const uint16_t INDEX_ZERO_STA = 0x7029;   // Zero flag bit: 0=0-2π, 1=-π-π
 
 // ----- Mode Constants -----
-const uint8_t MODE_MIT = 0;
-const uint8_t MODE_POS_CSP = 1;
-const uint8_t MODE_POS_PP = 3;
-const uint8_t MODE_VELOCITY = 2;
+// FIXED: Based on manual parameter 0x7005 run_mode values
+const uint8_t MODE_MIT = 0;       // Operation mode
+const uint8_t MODE_POS_PP = 1;    // Position mode (PP) - FIXED: was 3
+const uint8_t MODE_VELOCITY = 2;  // Velocity mode  
+const uint8_t MODE_POS_CSP = 5;   // Position mode (CSP) - FIXED: was 1
 
 // ----- Error Flag Constants -----
 const uint8_t ERROR_UNCALIBRATED = 0x20;  // bit 5
@@ -88,6 +90,7 @@ public:
     bool disable();
     bool resetFaults();
     bool setMechanicalZero();
+    bool setZeroFlag(uint8_t flag); // Set zero flag: 0=0-2π, 1=-π-π
 
     // ----- Mode Setting -----
     bool setModeVelocity();
