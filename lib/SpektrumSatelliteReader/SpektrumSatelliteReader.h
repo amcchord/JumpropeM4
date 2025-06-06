@@ -36,14 +36,41 @@ public:
     // Call this to update and process incoming data
     // Returns true if signal is valid
     bool update();
+    
+    // Decode MODE from channel 4 (0-based index 3)
+    int getModeFromChannel4() const;
+    
+    // Decode switch states from channel 6 (0-based index 5)
+    struct SwitchStates {
+        bool switchA;
+        bool switchB;
+    };
+    SwitchStates getSwitchStatesFromChannel6() const;
+    
+    // Get frame statistics for debugging
+    struct FrameStats {
+        unsigned long totalFrames;
+        unsigned long validFrames;
+        unsigned long formatDetectSamples;
+        unsigned long lastFrameTime;
+        bool is11Bit;
+        int detectedChannels;
+    };
+    FrameStats getFrameStats() const { return _frameStats; }
 
 private:
     // Spektrum satellite protocol constants
-    static const int SPEKTRUM_FRAME_SIZE = 16;  // 16 bytes per frame
-    static const int SPEKTRUM_CHANNELS_PER_FRAME = 7;  // 7 channels per frame
+    static const int DSM_FRAME_SIZE = 16;  // 16 bytes per frame
+    static const int DSM_FRAME_CHANNELS = 7;  // 7 channels per frame max
     static const unsigned long SPEKTRUM_BAUD_RATE = 115200;
-    static const unsigned long FRAME_TIMEOUT_MS = 100;  // Frame timeout
-    static const unsigned long SIGNAL_TIMEOUT_MS = 500; // Signal timeout
+    static const unsigned long FRAME_GAP_MS = 5;  // 5ms gap indicates new frame
+    static const unsigned long SIGNAL_TIMEOUT_MS = 200; // Signal timeout
+    
+    // Decode states (based on ArduPilot)
+    enum dsm_decode_state {
+        DSM_DECODE_STATE_DESYNC = 0,
+        DSM_DECODE_STATE_SYNC
+    };
     
     HardwareSerial& _serial;
     int _numChannels;
@@ -51,22 +78,38 @@ private:
     int _maxValue;
     int _defaultValue;
     
-    int* _channelValues;
+    int* _channelValues;        // Current channel values
     bool _receivingSignal;
     unsigned long _lastFrameTime;
+    unsigned long _lastRxTime;
     
-    uint8_t _frameBuffer[SPEKTRUM_FRAME_SIZE];
+    // Frame processing state
+    uint8_t _frameBuffer[DSM_FRAME_SIZE];
     int _frameIndex;
-    bool _frameStarted;
+    dsm_decode_state _decodeState;
     
-    // Process a complete frame
-    void processFrame();
+    // Format detection (based on ArduPilot)
+    int _channelShift;  // 10 or 11 bit mode
+    uint32_t _cs10, _cs11;  // Channel masks for format detection
+    int _formatSamples;
     
-    // Convert raw Spektrum channel data to microsecond values
-    int convertChannelValue(uint16_t rawValue, bool is11Bit);
+    // Frame statistics for debugging
+    FrameStats _frameStats;
     
-    // Check if we have a valid frame start
-    bool isValidFrameStart(uint8_t byte1, uint8_t byte2);
+    // Process a complete frame (ArduPilot approach)
+    bool processFrame(uint32_t frameTimeMs);
+    
+    // Process single byte (ArduPilot approach)
+    bool processByte(uint32_t frameTimeMs, uint8_t b);
+    
+    // Decode channel from raw data (ArduPilot approach)
+    bool decodeChannel(uint16_t raw, unsigned shift, unsigned *channel, unsigned *value);
+    
+    // Format detection (ArduPilot approach)
+    void detectFormat(bool reset);
+    
+    // Decode entire frame (ArduPilot approach)
+    bool decodeFrame(uint32_t frameTimeMs, const uint8_t frame[DSM_FRAME_SIZE]);
 };
 
 #endif // SPEKTRUM_SATELLITE_READER_H 
