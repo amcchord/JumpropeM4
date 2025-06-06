@@ -337,7 +337,6 @@ void loop() {
     static unsigned long lastSerialPrint = 0;
     static unsigned long lastStatsLog = 0;
     static unsigned long lastMotorUpdate = 0;
-    unsigned long currentLoopTime = millis();
     
     // Update RC receiver (only if RC is available)
     if (rcAvailable) {
@@ -373,7 +372,8 @@ void loop() {
     // Periodically request motor state directly using Type 0 query for both motors (only if CAN is available)
     if (canAvailable) {
         static unsigned long lastDirectQueryTime = 0;
-        if (currentLoopTime - lastDirectQueryTime >= 100) { // Every 100ms
+        unsigned long currentTime = millis();
+        if (currentTime - lastDirectQueryTime >= 100) { // Every 100ms
         // Send a Type 0 query to request state from motor 1
         uint32_t queryId1 = ((0x00) << 24) | (MASTER_ID << 16) | MOTOR_ID_1;
         if (CAN.beginExtendedPacket(queryId1 & 0x1FFFFFFF)) {
@@ -392,20 +392,90 @@ void loop() {
             }
         }
         
-            lastDirectQueryTime = currentLoopTime;
+            lastDirectQueryTime = currentTime;
         }
     }
     
-    // PRIORITY: Motor control logic (every 20ms) - only if motors and RC are ready
-    // This happens BEFORE display/serial updates to ensure consistent timing
-    if (motorsReady && rcAvailable && spektrumReader.isReceiving() && 
-        currentLoopTime - lastMotorUpdate >= 20) {
+    // Check if we're receiving signal (only if RC is available)
+    if (rcAvailable && !spektrumReader.isReceiving()) {
+        // No signal - show error
+        pixels.setPixelColor(0, pixels.Color(50, 0, 0)); // Red
+        pixels.show();
         
-        // Get RC channel values and switch states
+        // Update display every 200ms when no signal
+        if (displayAvailable && millis() - lastUpdate >= 200) {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("RC Channel Reader");
+            display.println("");
+            display.println("NO SIGNAL");
+            display.println("Check RC connection");
+            display.display();
+            lastUpdate = millis();
+        }
+        
+        // Print to serial every 1000ms when no signal
+        if (Serial && millis() - lastSerialPrint >= 1000) {
+            Serial.println("NO RC SIGNAL");
+            lastSerialPrint = millis();
+        }
+        
+        delay(50);
+        return;
+    }
+    
+    // If RC is not available, skip RC-based control but continue with other functions
+    if (!rcAvailable) {
+        // Update display to show RC not available
+        if (displayAvailable && millis() - lastUpdate >= 1000) {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("RC Not Available");
+            display.println("Motors Disabled");
+            display.println("Check RC connection");
+            display.display();
+            lastUpdate = millis();
+        }
+        
+        if (Serial && millis() - lastSerialPrint >= 2000) {
+            Serial.println("RC INPUT NOT AVAILABLE - Motors disabled for safety");
+            lastSerialPrint = millis();
+        }
+        
+        delay(100);
+        return;
+    }
+    
+    // We have signal - show green LED
+    pixels.setPixelColor(0, pixels.Color(0, 50, 0)); // Green
+    pixels.show();
+    
+    // Read all channels (up to 12)
+    int numChannelsToShow = min(12, spektrumReader.getChannelCount());
+    int channels[12];
+    for (int i = 0; i < numChannelsToShow; i++) {
+        channels[i] = spektrumReader.getChannel(i);
+    }
+    
+    // Get decoded special channels (needed for display and motor control)
+    int mode = 0;
+    SpektrumSatelliteReader::SwitchStates switches = {false, false};
+    SpektrumSatelliteReader::Channel8State ch8State = SpektrumSatelliteReader::CH8_LOW;
+    
+    if (rcAvailable) {
+        mode = spektrumReader.getModeFromChannel4();  // Channel 4 mode selection
+        switches = spektrumReader.getSwitchStatesFromChannel6();  // Switch states
+        ch8State = spektrumReader.getChannel8State();  // Channel 8 state tracking
+    }
+    
+    // Motor control logic (every 20ms) - only if motors are ready
+    if (motorsReady && millis() - lastMotorUpdate >= 20) {
+        // Get RC channel values
         int ch5Value = spektrumReader.getChannel(4);  // Channel 5 for velocity control (0-indexed as 4)
-        int mode = spektrumReader.getModeFromChannel4();  // Channel 4 mode selection
-        auto switches = spektrumReader.getSwitchStatesFromChannel6();  // Switch states
-        auto ch8State = spektrumReader.getChannel8State();  // Channel 8 state tracking
         
         // Motor 1 is reversed by default
         bool motor1Reversed = true;
@@ -516,70 +586,11 @@ void loop() {
             }
         }
         
-        lastMotorUpdate = currentLoopTime;
+        lastMotorUpdate = millis();
     }
-    
-    // Handle RC signal status and LED updates (less critical timing)
-    bool hasValidRCSignal = rcAvailable && spektrumReader.isReceiving();
-    
-    if (!hasValidRCSignal) {
-        // No signal or RC not available - show error
-        pixels.setPixelColor(0, pixels.Color(50, 0, 0)); // Red
-        pixels.show();
-        
-        // Update display when no signal/RC (less frequently to avoid blocking motor updates)
-        if (displayAvailable && currentLoopTime - lastUpdate >= 500) {
-            display.clearDisplay();
-            display.setTextSize(1);
-            display.setTextColor(SSD1306_WHITE);
-            display.setCursor(0, 0);
-            if (!rcAvailable) {
-                display.println("RC Not Available");
-                display.println("Motors Disabled");
-                display.println("Check RC connection");
-            } else {
-                display.println("RC Channel Reader");
-                display.println("");
-                display.println("NO SIGNAL");
-                display.println("Check RC connection");
-            }
-            display.display();
-            lastUpdate = currentLoopTime;
-        }
-        
-        // Print status to serial (less frequently)
-        if (Serial && currentLoopTime - lastSerialPrint >= 2000) {
-            if (!rcAvailable) {
-                Serial.println("RC INPUT NOT AVAILABLE - Motors disabled for safety");
-            } else {
-                Serial.println("NO RC SIGNAL");
-            }
-            lastSerialPrint = currentLoopTime;
-        }
-        
-        // Use shorter delay to maintain responsiveness for when signal returns
-        delay(10);
-        return;
-    }
-    
-    // We have valid RC signal - show green LED
-    pixels.setPixelColor(0, pixels.Color(0, 50, 0)); // Green
-    pixels.show();
-    
-    // Read all channels (up to 12) for display/serial output
-    int numChannelsToShow = min(12, spektrumReader.getChannelCount());
-    int channels[12];
-    for (int i = 0; i < numChannelsToShow; i++) {
-        channels[i] = spektrumReader.getChannel(i);
-    }
-    
-    // Get decoded special channels for display/serial output
-    int mode = spektrumReader.getModeFromChannel4();
-    auto switches = spektrumReader.getSwitchStatesFromChannel6();
-    auto ch8State = spektrumReader.getChannel8State();
     
     // Update OLED display every 150ms (only if display is available)
-    if (displayAvailable && currentLoopTime - lastUpdate >= 150) {
+    if (displayAvailable && millis() - lastUpdate >= 150) {
         display.clearDisplay();
         display.setTextSize(1);
         display.setTextColor(SSD1306_WHITE);
@@ -677,11 +688,11 @@ void loop() {
         }
         
         display.display();
-        lastUpdate = currentLoopTime;
+        lastUpdate = millis();
     }
     
     // Print to serial console every 100ms (only if serial is available)
-    if (Serial && currentLoopTime - lastSerialPrint >= 100) {
+    if (Serial && millis() - lastSerialPrint >= 100) {
         // Print channels 1-3
         for (int i = 0; i < min(3, numChannelsToShow); i++) {
             Serial.print(channels[i]);
@@ -772,11 +783,11 @@ void loop() {
         }
         
         Serial.println();
-        lastSerialPrint = currentLoopTime;
+        lastSerialPrint = millis();
     }
     
     // Print frame statistics every 5 seconds for debugging (only if serial is available)
-    if (Serial && currentLoopTime - lastStatsLog >= 5000) {
+    if (Serial && millis() - lastStatsLog >= 5000) {
         auto stats = spektrumReader.getFrameStats();
         Serial.println();
         Serial.println("=== FRAME STATISTICS ===");
@@ -795,7 +806,7 @@ void loop() {
         
         Serial.println("========================");
         Serial.println();
-        lastStatsLog = currentLoopTime;
+        lastStatsLog = millis();
     }
     
     // Small delay to prevent tight looping
