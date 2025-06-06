@@ -496,59 +496,189 @@ void loop() {
         // Mode 6 = Emergency Stop and Clear Errors
         bool shouldBeInPositionMode = (mode == 2 || mode == 3 || mode == 4 || mode == 5);
         
-        // Handle Mode 6 - Emergency Stop and Clear Errors
+        // Handle Mode 6 - Emergency Stop and Robust Communication Reset
         static bool mode6Executed = false;
         static int lastMode6Time = 0;
         static bool wasInMode6 = false;
         
         if (mode == 6) {
-            // Execute Mode 6 actions only once per mode entry or every 2 seconds while in mode
-            if (!mode6Executed || (millis() - lastMode6Time > 2000)) {
-                Logger::info("Mode 6: Clearing errors and stopping motors");
+            // Execute Mode 6 actions only once per mode entry or every 3 seconds while in mode
+            if (!mode6Executed || (millis() - lastMode6Time > 3000)) {
+                Logger::info("Mode 6: Starting robust communication reset sequence (preserving mechanical zero)");
                 
-                // Clear all motor faults
-                motor1.resetFaults();
-                motor2.resetFaults();
-                delay(100);
-                
-                // Stop motors by setting velocity to 0
+                // Step 1: Emergency stop - set velocity mode and stop
+                Logger::info("Step 1: Emergency stop");
                 motor1.setModeVelocity();
                 motor2.setModeVelocity();
                 delay(100);
                 motor1.setVelocity(0.0f);
                 motor2.setVelocity(0.0f);
+                delay(200);
+                
+                // Step 2: Reset faults and enable motors
+                Logger::info("Step 2: Resetting faults and enabling motors");
+                motor1.resetFaults();
+                motor2.resetFaults();
+                delay(100);
+                
+                motor1.enable();
+                motor2.enable();
+                delay(200);  // Give motors time to enable
+                
+                // Step 3: Configure zero flag (but don't reset mechanical zero)
+                Logger::info("Step 3: Configuring zero flag for proper position reference");
+                // Set zero flag to 1 for -π to π range (more suitable for position control)
+                if (!motor1.setZeroFlag(1)) {
+                    Logger::warning("Failed to set zero flag for motor1");
+                }
+                if (!motor2.setZeroFlag(1)) {
+                    Logger::warning("Failed to set zero flag for motor2");
+                }
+                delay(200);
+                
+                // // Step 4: Set motors to position mode
+                // Logger::info("Step 4: Setting position mode");
+                // if (!motor1.setModePositionPP(25.0f, 200.0f, 40.0f)) {
+                //     Logger::error("Failed to set motor1 to position mode!");
+                // }
+                // if (!motor2.setModePositionPP(25.0f, 200.0f, 40.0f)) {
+                //     Logger::error("Failed to set motor2 to position mode!");
+                // }
+                // delay(500);  // Allow time for mode setting to complete
+                
+                // Step 5: Enable active reporting
+                Logger::info("Step 5: Enabling active reporting");
+                
+                // Enable active reporting for motor1 with fallback
+                bool reportingEnabled1 = motor1.setActiveReporting(true);
+                if (!reportingEnabled1) {
+                    Logger::warning("Library method failed, trying direct approach for active reporting for motor1");
+                    
+                    // Type 5 message for active reporting command
+                    uint32_t reportingId1 = ((static_cast<uint32_t>(0x05) << 24) | 
+                                            (static_cast<uint32_t>(MASTER_ID) << 8) | 
+                                            static_cast<uint32_t>(MOTOR_ID_1)) & 0x1FFFFFFF;
+                    
+                    uint8_t reportingData[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = enable reporting
+                    
+                    if (CAN.beginExtendedPacket(reportingId1)) {
+                        CAN.write(reportingData, 8);
+                        if (CAN.endPacket()) {
+                            Logger::info("Direct active reporting command sent for motor1");
+                            reportingEnabled1 = true;
+                        } else {
+                            Logger::error("Failed to send direct active reporting command for motor1");
+                        }
+                    } else {
+                        Logger::error("Failed to begin direct active reporting packet for motor1");
+                    }
+                }
+                
+                // Enable active reporting for motor2 with fallback
+                bool reportingEnabled2 = motor2.setActiveReporting(true);
+                if (!reportingEnabled2) {
+                    Logger::warning("Library method failed, trying direct approach for active reporting for motor2");
+                    
+                    // Type 5 message for active reporting command
+                    uint32_t reportingId2 = ((static_cast<uint32_t>(0x05) << 24) | 
+                                            (static_cast<uint32_t>(MASTER_ID) << 8) | 
+                                            static_cast<uint32_t>(MOTOR_ID_2)) & 0x1FFFFFFF;
+                    
+                    uint8_t reportingData[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 0x01 = enable reporting
+                    
+                    if (CAN.beginExtendedPacket(reportingId2)) {
+                        CAN.write(reportingData, 8);
+                        if (CAN.endPacket()) {
+                            Logger::info("Direct active reporting command sent for motor2");
+                            reportingEnabled2 = true;
+                        } else {
+                            Logger::error("Failed to send direct active reporting command for motor2");
+                        }
+                    } else {
+                        Logger::error("Failed to begin direct active reporting packet for motor2");
+                    }
+                }
+                
+                if (reportingEnabled1 && reportingEnabled2) {
+                    Logger::info("Active reporting enabled for both motors");
+                } else {
+                    Logger::warning("Active reporting setup had issues - some motors may not report feedback");
+                }
+                
+                delay(200);
+                
+                // Step 6: Move both motors to position 0 (using existing mechanical zero)
+                Logger::info("Step 6: Moving to stored zero position (mechanical zero preserved)");
+                motor1.setPosition(0.0f);
+                motor2.setPosition(0.0f);
+                delay(200);
+                
+                // Step 7: Reset control variables (but not mechanical zero)
+                Logger::info("Step 7: Resetting control variables");
+                currentTargetPosition = 0.0f;
+                nudgeableZeroPosition = 0.0f;  // Reset the nudgeable zero position
+                
+                // Communication reset is always successful (no dependency on mechanical zero)
+                Logger::info("Mode 6: Robust communication reset successful - mechanical zero preserved");
+                motorsReady = true;
                 
                 mode6Executed = true;
                 lastMode6Time = millis();
-                Logger::info("Motors stopped and errors cleared");
+                Logger::info("Mode 6: Motors reset and ready (use Switch A to reset mechanical zero if needed)");
             }
             wasInMode6 = true;
         } else {
             // Reset Mode 6 execution flag when exiting Mode 6
             if (wasInMode6) {
-                Logger::info("Exiting Mode 6 - preparing for normal operation");
-                
-                // Re-enable motors and clear any remaining faults
-                motor1.resetFaults();
-                motor2.resetFaults();
-                delay(100);
-                motor1.enable();
-                motor2.enable();
-                delay(100);
+                Logger::info("Exiting Mode 6 - communication reset complete");
                 
                 mode6Executed = false;
                 modeInitialized = false;  // Force re-initialization of the new mode
                 wasInMode6 = false;
                 
-                Logger::info("Motors re-enabled and ready for mode transition");
+                Logger::info("Ready for normal operation with reset communication");
             }
         }
+        
+        // Handle mechanical zero reset using Switch A (only in Mode 6)
+        static bool lastSwitchAState = false;
+        if (switches.switchA && !lastSwitchAState && mode == 6) {
+            // Rising edge detection - switch just turned ON, and we're in Mode 6
+            Logger::info("Switch A pressed in Mode 6 - Setting NEW mechanical zero position and resetting nudgeable zero");
+            
+            bool zero1Success = motor1.setMechanicalZero();
+            bool zero2Success = motor2.setMechanicalZero();
+            
+            if (!zero1Success) {
+                Logger::error("Failed to set mechanical zero for motor1!");
+            }
+            if (!zero2Success) {
+                Logger::error("Failed to set mechanical zero for motor2!");
+            }
+            
+            if (zero1Success && zero2Success) {
+                Logger::info("New mechanical zero positions set successfully");
+            } else {
+                Logger::warning("Mechanical zero setting had errors - check motor connections");
+            }
+            
+            delay(500);  // Allow time for zero setting to complete
+            
+            // Move to new zero position
+            motor1.setPosition(0.0f);
+            motor2.setPosition(0.0f);
+            
+            currentTargetPosition = 0.0f;
+            nudgeableZeroPosition = 0.0f;  // Reset the nudgeable zero position
+        }
+        lastSwitchAState = switches.switchA;
         
         // Switch modes if needed or if switching between different position modes
         static int lastMode = 0;
         if ((shouldBeInPositionMode != inPositionMode || mode != lastMode) && mode != 6) {
             inPositionMode = shouldBeInPositionMode;
             modeInitialized = false;
+            
             if (mode == 1) {
                 Logger::info("Switching to velocity mode (Mode 1)");
             } else if (mode == 2) {
@@ -558,7 +688,7 @@ void loop() {
             } else if (mode == 4) {
                 Logger::info("Switching to position mode with fixed positions (Mode 4)");
             } else if (mode == 5) {
-                Logger::info("Switching to position mode with individual motor control (Mode 5)");
+                Logger::info("Switching to position mode with individual motor control (Mode 5) - smoothing enabled");
             }
         }
         
@@ -583,18 +713,6 @@ void loop() {
             modeInitialized = true;
             delay(100);  // Give time for mode change
         }
-        
-        // Handle zero position command using Switch A (only in Mode 6)
-        static bool lastSwitchAState = false;
-        if (switches.switchA && !lastSwitchAState && mode == 6) {
-            // Rising edge detection - switch just turned ON, and we're in Mode 6
-            Logger::info("Switch A pressed in Mode 6 - Setting mechanical zero position and resetting nudgeable zero");
-            motor1.setMechanicalZero();
-            motor2.setMechanicalZero();
-            currentTargetPosition = 0.0f;
-            nudgeableZeroPosition = 0.0f;  // Reset the nudgeable zero position
-        }
-        lastSwitchAState = switches.switchA;
         
         // Execute motor commands based on mode (skip for Mode 6 - motors already stopped)
         if (modeInitialized && mode != 6) {
@@ -677,8 +795,19 @@ void loop() {
                     currentTargetPosition = 0.0f;  // Not used in Mode 4, individual targets are used
                     
                     // Send individual position commands to motors with direction control
-                    float motor1TargetPosition = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
-                    float motor2TargetPosition = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+                    float motor1TargetPosition;
+                    if (motor1Reversed) {
+                        motor1TargetPosition = -4.4f;  // Reversed: -(-4.4) = 4.4
+                    } else {
+                        motor1TargetPosition = -4.4f; // Not reversed: -4.4
+                    }
+
+                    float motor2TargetPosition;
+                    if (motor2Reversed) {
+                        motor2TargetPosition = 0.6f;  // Reversed: -(-0.6) = 0.6
+                    } else {
+                        motor2TargetPosition = -0.6f; // Not reversed: -0.6
+                    }
                     motor1.setPosition(motor1TargetPosition);
                     motor2.setPosition(motor2TargetPosition);
                 } else if (mode == 5) {
@@ -705,9 +834,34 @@ void loop() {
                         motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
                     }
                     
-                    // Send individual position commands to motors with direction control
-                    float motor1TargetPosition = motor1Reversed ? -motor1Position : motor1Position;
-                    float motor2TargetPosition = motor2Reversed ? -motor2Position : motor2Position;
+                    // Apply exponential smoothing to reduce jerky motions
+                    static float smoothedMotor1Position = 0.0f;
+                    static float smoothedMotor2Position = 0.0f;
+                    static bool smoothingInitialized = false;
+                    static int lastSmoothingMode = 0;
+                    const float smoothingFactor = 0.15f;  // Lower = more smoothing, Higher = more responsive
+                    
+                    // Reset smoothing when entering mode 5 from a different mode
+                    if (mode != lastSmoothingMode) {
+                        smoothingInitialized = false;
+                        lastSmoothingMode = mode;
+                    }
+                    
+                    // Initialize smoothed values on first run in mode 5 or after mode change
+                    if (!smoothingInitialized) {
+                        smoothedMotor1Position = motor1Position;
+                        smoothedMotor2Position = motor2Position;
+                        smoothingInitialized = true;
+                        Logger::info("Mode 5 smoothing initialized/reset");
+                    }
+                    
+                    // Apply exponential smoothing: smoothed = smoothed + factor * (new - smoothed)
+                    smoothedMotor1Position += smoothingFactor * (motor1Position - smoothedMotor1Position);
+                    smoothedMotor2Position += smoothingFactor * (motor2Position - smoothedMotor2Position);
+                    
+                    // Send individual position commands to motors with direction control using smoothed values
+                    float motor1TargetPosition = motor1Reversed ? -smoothedMotor1Position : smoothedMotor1Position;
+                    float motor2TargetPosition = motor2Reversed ? -smoothedMotor2Position : smoothedMotor2Position;
                     motor1.setPosition(motor1TargetPosition);
                     motor2.setPosition(motor2TargetPosition);
                     
@@ -790,7 +944,7 @@ void loop() {
             motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
             motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
         } else if (mode == 5) {
-            // Mode 5: Individual motor control - calculate from channel values
+            // Mode 5: Individual motor control - calculate from channel values with display smoothing
             int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
             int ch9Value = spektrumReader.getChannel(8);  // Channel 9 for Motor 2
             
@@ -814,8 +968,30 @@ void loop() {
                 motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
             }
             
-            motor1Target = motor1Reversed ? -motor1Position : motor1Position;
-            motor2Target = motor2Reversed ? -motor2Position : motor2Position;
+            // Apply smoothing for display (matches motor control smoothing)
+            static float displaySmoothedMotor1 = 0.0f;
+            static float displaySmoothedMotor2 = 0.0f;
+            static bool displaySmoothingInit = false;
+            static int lastDisplayMode = 0;
+            const float displaySmoothingFactor = 0.15f;
+            
+            // Reset display smoothing when mode changes
+            if (mode != lastDisplayMode) {
+                displaySmoothingInit = false;
+                lastDisplayMode = mode;
+            }
+            
+            if (!displaySmoothingInit) {
+                displaySmoothedMotor1 = motor1Position;
+                displaySmoothedMotor2 = motor2Position;
+                displaySmoothingInit = true;
+            }
+            
+            displaySmoothedMotor1 += displaySmoothingFactor * (motor1Position - displaySmoothedMotor1);
+            displaySmoothedMotor2 += displaySmoothingFactor * (motor2Position - displaySmoothedMotor2);
+            
+            motor1Target = motor1Reversed ? -displaySmoothedMotor1 : displaySmoothedMotor1;
+            motor2Target = motor2Reversed ? -displaySmoothedMotor2 : displaySmoothedMotor2;
         } else if (inPositionMode) {
             motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
             motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
@@ -902,7 +1078,7 @@ void loop() {
             motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
             motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
         } else if (mode == 5) {
-            // Mode 5: Individual motor control - calculate from channel values
+            // Mode 5: Individual motor control - calculate from channel values with serial smoothing
             int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
             int ch9Value = spektrumReader.getChannel(8);  // Channel 9 for Motor 2
             
@@ -926,8 +1102,30 @@ void loop() {
                 motor2Position = map(ch9Value, MID_PULSE + DEAD_ZONE, MAX_PULSE, 0, 7000) * 0.001f;
             }
             
-            motor1Target = motor1Reversed ? -motor1Position : motor1Position;
-            motor2Target = motor2Reversed ? -motor2Position : motor2Position;
+            // Apply smoothing for serial output (matches motor control smoothing)
+            static float serialSmoothedMotor1 = 0.0f;
+            static float serialSmoothedMotor2 = 0.0f;
+            static bool serialSmoothingInit = false;
+            static int lastSerialMode = 0;
+            const float serialSmoothingFactor = 0.15f;
+            
+            // Reset serial smoothing when mode changes
+            if (mode != lastSerialMode) {
+                serialSmoothingInit = false;
+                lastSerialMode = mode;
+            }
+            
+            if (!serialSmoothingInit) {
+                serialSmoothedMotor1 = motor1Position;
+                serialSmoothedMotor2 = motor2Position;
+                serialSmoothingInit = true;
+            }
+            
+            serialSmoothedMotor1 += serialSmoothingFactor * (motor1Position - serialSmoothedMotor1);
+            serialSmoothedMotor2 += serialSmoothingFactor * (motor2Position - serialSmoothedMotor2);
+            
+            motor1Target = motor1Reversed ? -serialSmoothedMotor1 : serialSmoothedMotor1;
+            motor2Target = motor2Reversed ? -serialSmoothedMotor2 : serialSmoothedMotor2;
         } else if (inPositionMode) {
             motor1Target = motor1Reversed ? -currentTargetPosition : currentTargetPosition;
             motor2Target = motor2Reversed ? -currentTargetPosition : currentTargetPosition;
