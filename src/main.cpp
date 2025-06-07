@@ -317,14 +317,16 @@ void setup() {
         Serial.println("  Channel 4 Mode 1 = Velocity Mode");
         Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control, Ch5 nudges zero ±0.2rad)");
         Serial.println("  Channel 4 Mode 3 = Position Mode (SwA=-0.1rad, SwB=3.9rad, Ch5=1.9±2π rad)");
+        Serial.println("    Mode 3: Ch10 adds 0-0.8rad shift (SwA: negative, SwB: positive)");
         Serial.println("  Channel 4 Mode 4 = Position Mode (Fixed: M1=-4.4rad, M2=-0.6rad)");
         Serial.println("  Channel 4 Mode 5 = Position Mode (Individual motor control)");
         Serial.println("  Channel 4 Mode 6 = Emergency Stop and Clear Errors");
-        Serial.println("  Switch A = Set mechanical zero (Mode 6), or Position -0.1rad (Mode 3)");
+        Serial.println("  Switch A = Set mechanical zero (Mode 6), or Position -0.1rad-Ch10_shift (Mode 3)");
         Serial.println("  Channel 5 = Velocity control (Mode 1), Zero nudging (Mode 2), or Position 1.9±2π rad (Mode 3, no switches)");
         Serial.println("  Channel 7 = Motor 1 position ±7rad (Mode 5 only)");
-        Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2), or Position 3.9rad (Mode 3)");
+        Serial.println("  Switch B = Position control: OFF=0rad, ON=3.8rad (Mode 2), or Position 3.9rad+Ch10_shift (Mode 3)");
         Serial.println("  Channel 9 = Motor 2 position ±7rad (Mode 5 only)");
+        Serial.println("  Channel 10 = Mode 3 shift amount: 0-0.8rad (SwA: negative, SwB: positive)");
         Serial.println("  Channel 8 = State tracking only (Low/Middle/High)");
         Serial.println("  Motor 1 is REVERSED by default");
         Serial.println("Mode  M1_Desired  M2_Desired  ButtonA  ButtonB");
@@ -765,12 +767,24 @@ void loop() {
                     }
                 } else if (mode == 3) {
                     // Mode 3: Position mode - Switch A = -0.1 rad, Switch B = 3.9 rad, or Channel 5 control
+                    // Channel 10 provides additional shift of 0-0.8 rad when switches are pressed
+                    
+                    // Get Channel 10 value for shift calculation
+                    int ch10Value = spektrumReader.getChannel(9);  // Channel 10 (0-indexed as 9)
+                    
+                    // Map Channel 10 from pulse range to shift amount (0 to 0.8 radians)
+                    float shiftAmount = 0.0f;
+                    if (ch10Value >= MIN_PULSE && ch10Value <= MAX_PULSE) {
+                        shiftAmount = map(ch10Value, MIN_PULSE, MAX_PULSE, 0, 800) * 0.001f;  // 0 to 0.8 radians
+                    }
                     
                     // Check for switch overrides first
                     if (switches.switchA) {
-                        currentTargetPosition = -0.1f;  // Switch A = -0.1 radians
+                        // Switch A = -0.1 rad with negative shift from Channel 10
+                        currentTargetPosition = -0.1f - shiftAmount;
                     } else if (switches.switchB) {
-                        currentTargetPosition = 3.9f;   // Switch B = 3.9 radians
+                        // Switch B = 3.9 rad with positive shift from Channel 10
+                        currentTargetPosition = 3.9f + shiftAmount;
                     } else {
                         // No switches pressed - use Channel 5 to control position around 1.9 rad base with ±2π range
                         float basePosition = 1.9f;
