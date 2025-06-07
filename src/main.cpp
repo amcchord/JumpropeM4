@@ -313,6 +313,7 @@ void setup() {
         Serial.println("FIXED: Updated position constants from -12.5/12.5 to -12.57/12.57 rad");
         Serial.println("FIXED: Corrected mode values and parameter indices from manual");
         Serial.println("FIXED: Zero flag set to 1 for -π to π position range");
+        Serial.println("SAFETY: Emergency stop if no RC signal or frame timeout for 3 seconds");
         Serial.println("Control Scheme:");
         Serial.println("  Channel 4 Mode 1 = Velocity Mode");
         Serial.println("  Channel 4 Mode 2 = Position Mode (Switch B control, Ch5 nudges zero ±0.2rad)");
@@ -329,6 +330,7 @@ void setup() {
         Serial.println("  Channel 10 = Mode 3 shift amount: 0-0.8rad (SwA: negative, SwB: positive)");
         Serial.println("  Channel 8 = State tracking only (Low/Middle/High)");
         Serial.println("  Motor 1 is REVERSED by default");
+        Serial.println("  SAFETY: Motors emergency stop if no RC signal or frame timeout for 3+ seconds");
         Serial.println("Mode  M1_Desired  M2_Desired  ButtonA  ButtonB");
     }
 }
@@ -341,6 +343,12 @@ static float nudgeableZeroPosition = 0.0f;  // Adjustable zero position (±0.2 r
 static unsigned long lastNudgeTime = 0;
 static bool wasNudging = false;
 
+// ----- Safety Variables -----
+static bool emergencyStopActive = false;
+static unsigned long noSignalStartTime = 0;
+static bool noSignalTimerActive = false;
+const unsigned long RC_TIMEOUT_MS = 3000;  // 3 seconds timeout
+
 // ----- Main Loop -----
 void loop() {
     static unsigned long lastUpdate = 0;
@@ -351,6 +359,70 @@ void loop() {
     // Update RC receiver (only if RC is available)
     if (rcAvailable) {
         spektrumReader.update();
+    }
+    
+    // ----- SAFETY CHECK: RC Frame Timeout -----
+    if (rcAvailable && motorsReady) {
+        auto stats = spektrumReader.getFrameStats();
+        unsigned long currentTime = millis();
+        
+        // Check if we've received any frames and if the last frame is too old
+        bool rcTimedOut = false;
+        if (stats.validFrames > 0 && stats.lastFrameTime > 0) {
+            unsigned long timeSinceLastFrame = currentTime - stats.lastFrameTime;
+            rcTimedOut = (timeSinceLastFrame > RC_TIMEOUT_MS);
+        } else if (stats.validFrames == 0) {
+            // No valid frames received yet - this is also a timeout condition
+            rcTimedOut = true;
+        }
+        
+        // Handle emergency stop activation
+        if (rcTimedOut && !emergencyStopActive) {
+            emergencyStopActive = true;
+            Logger::error("RC SIGNAL TIMEOUT - EMERGENCY STOP ACTIVATED");
+            
+            // Immediately stop motors
+            if (motorControllerAvailable) {
+                motor1.setModeVelocity();
+                motor2.setModeVelocity();
+                delay(50);
+                motor1.setVelocity(0.0f);
+                motor2.setVelocity(0.0f);
+                delay(200);
+                //Disable
+                motor1.disable();
+                motor2.disable();
+                delay(200);
+
+                //Reset faults
+                motor1.resetFaults();
+                motor2.resetFaults();
+                delay(200);
+                //Enable motors
+            }
+            
+            // Reset control state
+            inPositionMode = false;
+            modeInitialized = false;
+            currentTargetPosition = 0.0f;
+            
+            // Visual indication
+            pixels.setPixelColor(0, pixels.Color(50, 0, 0)); // Red for emergency stop
+            pixels.show();
+        }
+        
+        // Handle recovery from emergency stop
+        if (!rcTimedOut && emergencyStopActive) {
+            emergencyStopActive = false;
+            Logger::info("RC SIGNAL RECOVERED - Emergency stop deactivated");
+            
+            // Reset mode initialization to allow proper mode setup
+            modeInitialized = false;
+            
+            // Visual indication back to normal
+            pixels.setPixelColor(0, pixels.Color(0, 50, 0)); // Green for normal operation
+            pixels.show();
+        }
     }
     
     // Process CAN messages more aggressively to update motor feedback (only if CAN is available)
@@ -408,6 +480,34 @@ void loop() {
     
     // Check if we're receiving signal (only if RC is available)
     if (rcAvailable && !spektrumReader.isReceiving()) {
+        // Start no signal timer if not already started
+        if (!noSignalTimerActive) {
+            noSignalStartTime = millis();
+            noSignalTimerActive = true;
+            Logger::warning("NO RC SIGNAL detected - starting 3 second safety timer");
+        }
+        
+        // Check if we've been in no signal mode for 3 seconds
+        unsigned long noSignalDuration = millis() - noSignalStartTime;
+        if (noSignalDuration >= RC_TIMEOUT_MS && !emergencyStopActive && motorsReady) {
+            emergencyStopActive = true;
+            Logger::error("NO SIGNAL TIMEOUT - EMERGENCY STOP ACTIVATED");
+            
+            // Immediately stop motors
+            if (motorControllerAvailable) {
+                motor1.setModeVelocity();
+                motor2.setModeVelocity();
+                delay(50);
+                motor1.setVelocity(0.0f);
+                motor2.setVelocity(0.0f);
+            }
+            
+            // Reset control state
+            inPositionMode = false;
+            modeInitialized = false;
+            currentTargetPosition = 0.0f;
+        }
+        
         // No signal - show error
         pixels.setPixelColor(0, pixels.Color(50, 0, 0)); // Red
         pixels.show();
@@ -419,9 +519,18 @@ void loop() {
             display.setTextColor(SSD1306_WHITE);
             display.setCursor(0, 0);
             display.println("Motor Control");
-            display.println("Mode: NO SIGNAL");
-            display.println("M1 Des: STOP");
-            display.println("M2 Des: STOP");
+            
+            if (emergencyStopActive) {
+                display.println("*** EMERGENCY STOP ***");
+                display.println("NO SIGNAL TIMEOUT");
+                display.println("Motors STOPPED");
+            } else {
+                display.println("Mode: NO SIGNAL");
+                display.print("Safety: ");
+                display.print((RC_TIMEOUT_MS - noSignalDuration) / 1000 + 1);
+                display.println("s");
+                display.println("M1 Des: STOP");
+            }
             display.println("Btn A: ---  B: ---");
             display.display();
             lastUpdate = millis();
@@ -429,12 +538,33 @@ void loop() {
         
         // Print to serial every 1000ms when no signal
         if (Serial && millis() - lastSerialPrint >= 1000) {
-            Serial.println("NO RC SIGNAL");
+            if (emergencyStopActive) {
+                Serial.println("NO RC SIGNAL - EMERGENCY STOP ACTIVE");
+            } else {
+                unsigned long timeLeft = (RC_TIMEOUT_MS - noSignalDuration) / 1000 + 1;
+                Serial.print("NO RC SIGNAL - Emergency stop in ");
+                Serial.print(timeLeft);
+                Serial.println(" seconds");
+            }
             lastSerialPrint = millis();
         }
         
         delay(50);
         return;
+    } else if (noSignalTimerActive) {
+        // Signal has returned - reset the no signal timer and emergency stop if it was from no signal
+        noSignalTimerActive = false;
+        if (emergencyStopActive) {
+            emergencyStopActive = false;
+            Logger::info("RC SIGNAL RECOVERED from NO SIGNAL - Emergency stop deactivated");
+            
+            // Reset mode initialization to allow proper mode setup
+            modeInitialized = false;
+            
+            // Visual indication back to normal
+            pixels.setPixelColor(0, pixels.Color(0, 50, 0)); // Green for normal operation
+            pixels.show();
+        }
     }
     
     // If RC is not available, skip RC-based control but continue with other functions
@@ -480,8 +610,8 @@ void loop() {
         ch8State = spektrumReader.getChannel8State();  // Channel 8 state tracking
     }
     
-            // Motor control logic (every 20ms) - only if motors are ready
-        if (motorsReady && millis() - lastMotorUpdate >= 20) {
+            // Motor control logic (every 20ms) - only if motors are ready and not in emergency stop
+        if (motorsReady && !emergencyStopActive && millis() - lastMotorUpdate >= 20) {
             // Get RC channel values
             int ch5Value = spektrumReader.getChannel(4);  // Channel 5 for velocity control (0-indexed as 4)
             int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1 control (0-indexed as 6)
@@ -924,6 +1054,17 @@ void loop() {
         display.setCursor(0, 0);
         display.println("Motor Control");
         
+        // Show emergency stop status first if active
+        if (emergencyStopActive) {
+            display.println("*** EMERGENCY STOP ***");
+            display.println("RC SIGNAL TIMEOUT");
+            display.println("Motors STOPPED");
+            display.println("Check RC connection");
+            display.display();
+            lastUpdate = millis();
+            return; // Skip normal display content
+        }
+        
         // Show current mode
         display.print("Mode: ");
         if (mode == 1) {
@@ -1057,6 +1198,13 @@ void loop() {
     
     // Print to serial console every 100ms (only if serial is available)
     if (Serial && millis() - lastSerialPrint >= 100) {
+        // Show emergency stop status if active
+        if (emergencyStopActive) {
+            Serial.println("*** EMERGENCY STOP ACTIVE *** RC SIGNAL TIMEOUT - Motors STOPPED - Check RC connection");
+            lastSerialPrint = millis();
+            return; // Skip normal serial output
+        }
+        
         // Print mode information
         Serial.print("Mode:");
         if (mode == 1) {
