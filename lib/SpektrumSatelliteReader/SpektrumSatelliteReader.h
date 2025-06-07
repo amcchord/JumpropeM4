@@ -17,6 +17,12 @@ public:
     // Initialize the Spektrum satellite reader in bind mode (uses same pin as serial RX)
     bool beginBindMode();
     
+    // Initialize timer-based interrupt processing (SAMD51 specific)
+    bool beginInterruptMode(int timerFrequencyHz = 500);  // Default 500Hz = 2ms intervals
+    
+    // Stop interrupt mode
+    void endInterruptMode();
+    
     // Get channel value (in microseconds, mapped to 1000-2000 range like CPPM)
     int getChannel(int channel) const;
     
@@ -36,6 +42,9 @@ public:
     // Call this to update and process incoming data
     // Returns true if signal is valid
     bool update();
+    
+    // Interrupt-safe update method (called from timer interrupt)
+    void updateFromInterrupt();
     
     // Decode MODE from channel 4 (0-based index 3)
     int getModeFromChannel4() const;
@@ -105,6 +114,10 @@ private:
     // Frame statistics for debugging
     FrameStats _frameStats;
     
+    // Interrupt mode state
+    bool _interruptMode;
+    static SpektrumSatelliteReader* _instance;  // For interrupt callback
+    
     // Process a complete frame (ArduPilot approach)
     bool processFrame(uint32_t frameTimeMs);
     
@@ -117,8 +130,11 @@ private:
     // Format detection (ArduPilot approach)
     void detectFormat(bool reset);
     
-    // Decode entire frame (ArduPilot approach)
-    bool decodeFrame(uint32_t frameTimeMs, const uint8_t frame[DSM_FRAME_SIZE]);
+    // Decode frame data (ArduPilot approach)
+    bool decodeFrame(uint32_t frameTimeMs, const uint8_t* frame);
+    
+    // Static interrupt handler
+    static void timerInterruptHandler();
 };
 
 #endif // SPEKTRUM_SATELLITE_READER_H 

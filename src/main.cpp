@@ -79,8 +79,19 @@ void setup() {
     
     // Initialize RC input (non-blocking)
     if (spektrumReader.begin()) {
+        // Try to enable interrupt mode for better timing reliability
+        if (spektrumReader.beginInterruptMode(500)) {  // 500Hz = 2ms intervals
+            Logger::info("Spektrum reader initialized with interrupt mode (500Hz)");
+            if (Serial) {
+                Serial.println("RC Receiver: Interrupt mode enabled for better timing");
+            }
+        } else {
+            Logger::info("Spektrum reader initialized in polling mode");
+            if (Serial) {
+                Serial.println("RC Receiver: Using polling mode (interrupt not available)");
+            }
+        }
         rcAvailable = true;
-        Logger::info("Spektrum reader initialized");
     } else {
         Logger::error("Spektrum reader initialization failed - continuing without RC input");
         if (Serial) {
@@ -331,6 +342,7 @@ void setup() {
         Serial.println("  Channel 8 = State tracking only (Low/Middle/High)");
         Serial.println("  Motor 1 is REVERSED by default");
         Serial.println("  SAFETY: Motors emergency stop if no RC signal or frame timeout for 3+ seconds");
+        Serial.println("  TIMING: RC input processed via 500Hz timer interrupt for consistent timing");
         Serial.println("Mode  M1_Desired  M2_Desired  ButtonA  ButtonB");
     }
 }
@@ -357,6 +369,7 @@ void loop() {
     static unsigned long lastMotorUpdate = 0;
     
     // Update RC receiver (only if RC is available)
+    // Note: In interrupt mode, this just checks timeout status
     if (rcAvailable) {
         spektrumReader.update();
     }
@@ -425,10 +438,10 @@ void loop() {
         }
     }
     
-    // Process CAN messages more aggressively to update motor feedback (only if CAN is available)
+    // Process CAN messages for motor feedback (only if CAN is available)
     if (canAvailable) {
-        // Call multiple times per loop to be more aggressive about capturing feedback
-        for (int i = 0; i < 5; i++) {
+        // Process available messages (reduced from 5 to 3 iterations to reduce loop time)
+        for (int i = 0; i < 3; i++) {
             int packetSize = CAN.parsePacket();
             if (packetSize) {
                 CanFrame frame;
@@ -445,9 +458,9 @@ void loop() {
                 // Process the frame with both motors to update their feedback
                 motor1.processFeedback(frame);
                 motor2.processFeedback(frame);
+            } else {
+                break; // No more packets available, exit early
             }
-            // Small delay between processing attempts
-            delayMicroseconds(100);
         }
     }
     
@@ -521,9 +534,10 @@ void loop() {
             display.println("Motor Control");
             
             if (emergencyStopActive) {
-                display.println("*** EMERGENCY STOP ***");
+                display.println("** EMERGENCY STOP **");
                 display.println("NO SIGNAL TIMEOUT");
                 display.println("Motors STOPPED");
+                display.println("!ARMS ARE SAFE!");
             } else {
                 display.println("Mode: NO SIGNAL");
                 display.print("Safety: ");
@@ -905,15 +919,15 @@ void loop() {
                     // Map Channel 10 from pulse range to shift amount (0 to 0.8 radians)
                     float shiftAmount = 0.0f;
                     if (ch10Value >= MIN_PULSE && ch10Value <= MAX_PULSE) {
-                        shiftAmount = map(ch10Value, MIN_PULSE, MAX_PULSE, 0, 800) * 0.001f;  // 0 to 0.8 radians
+                        shiftAmount = map(ch10Value, MIN_PULSE, MAX_PULSE, 0, 3000) * 0.001f;  // 0 to 3 radians
                     }
                     
                     // Check for switch overrides first
-                    if (switches.switchA) {
-                        // Switch A = -0.1 rad with negative shift from Channel 10
+                    if (switches.switchB) {
+                        // Switch B = -0.1 rad with negative shift from Channel 10
                         currentTargetPosition = -0.1f - shiftAmount;
-                    } else if (switches.switchB) {
-                        // Switch B = 3.9 rad with positive shift from Channel 10
+                    } else if (switches.switchA) {
+                        // Switch A = 3.9 rad with positive shift from Channel 10
                         currentTargetPosition = 3.9f + shiftAmount;
                     } else {
                         // No switches pressed - use Channel 5 to control position around 1.9 rad base with ±2π range
@@ -935,22 +949,41 @@ void loop() {
                         currentTargetPosition = basePosition + positionOffset;
                     }
                 } else if (mode == 4) {
-                    // Mode 4: Position mode - fixed positions (M1=-4.4rad, M2=-0.6rad)
+                    // Mode 4: Position mode - fixed positions with button A override
+                    // Default: M1=-4.4rad, M2=-0.6rad
+                    // Button A pressed: M1=-2.4rad, M2=1.3rad
                     currentTargetPosition = 0.0f;  // Not used in Mode 4, individual targets are used
                     
                     // Send individual position commands to motors with direction control
                     float motor1TargetPosition;
-                    if (motor1Reversed) {
-                        motor1TargetPosition = -4.4f;  // Reversed: -(-4.4) = 4.4
-                    } else {
-                        motor1TargetPosition = -4.4f; // Not reversed: -4.4
-                    }
-
                     float motor2TargetPosition;
-                    if (motor2Reversed) {
-                        motor2TargetPosition = 0.6f;  // Reversed: -(-0.6) = 0.6
+                    
+                    if (switches.switchA) {
+                        // Button A pressed - use alternate positions
+                        if (motor1Reversed) {
+                            motor1TargetPosition = -2.4f;
+                        } else {
+                            motor1TargetPosition = -2.4f; // Not reversed: -2.4
+                        }
+
+                        if (motor2Reversed) {
+                            motor2TargetPosition = -1.3f;  // Reversed: -(1.3) = -1.3  
+                        } else {
+                            motor2TargetPosition = 1.3f; // Not reversed: 1.3
+                        }
                     } else {
-                        motor2TargetPosition = -0.6f; // Not reversed: -0.6
+                        // Button A not pressed - use default positions
+                        if (motor1Reversed) {
+                            motor1TargetPosition = -4.4f;  
+                        } else {
+                            motor1TargetPosition = -4.4f; // Not reversed: -4.4
+                        }
+
+                        if (motor2Reversed) {
+                            motor2TargetPosition = -(-0.6f);  // Reversed: -(-0.6) = 0.6
+                        } else {
+                            motor2TargetPosition = -0.6f; // Not reversed: -0.6
+                        }
                     }
                     motor1.setPosition(motor1TargetPosition);
                     motor2.setPosition(motor2TargetPosition);
@@ -1095,9 +1128,16 @@ void loop() {
             motor1Target = 0.0f;
             motor2Target = 0.0f;
         } else if (mode == 4) {
-            // Mode 4: Fixed positions (M1=-4.4rad, M2=-0.6rad)
-            motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
-            motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+            // Mode 4: Fixed positions with button A override
+            if (switches.switchA) {
+                // Button A pressed - alternate positions
+                motor1Target = motor1Reversed ? -(-2.4f) : -2.4f;  // M1 target: -2.4 rad
+                motor2Target = motor2Reversed ? -1.3f : 1.3f;       // M2 target: 1.3 rad
+            } else {
+                // Button A not pressed - default positions
+                motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
+                motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+            }
         } else if (mode == 5) {
             // Mode 5: Individual motor control - calculate from channel values with display smoothing
             int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
@@ -1236,9 +1276,16 @@ void loop() {
             motor1Target = 0.0f;
             motor2Target = 0.0f;
         } else if (mode == 4) {
-            // Mode 4: Fixed positions (M1=-4.4rad, M2=-0.6rad)
-            motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
-            motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+            // Mode 4: Fixed positions with button A override
+            if (switches.switchA) {
+                // Button A pressed - alternate positions
+                motor1Target = motor1Reversed ? -(-2.4f) : -2.4f;  // M1 target: -2.4 rad
+                motor2Target = motor2Reversed ? -1.3f : 1.3f;       // M2 target: 1.3 rad
+            } else {
+                // Button A not pressed - default positions
+                motor1Target = motor1Reversed ? -(-4.4f) : -4.4f;  // M1 target: -4.4 rad
+                motor2Target = motor2Reversed ? -(-0.6f) : -0.6f;   // M2 target: -0.6 rad
+            }
         } else if (mode == 5) {
             // Mode 5: Individual motor control - calculate from channel values with serial smoothing
             int ch7Value = spektrumReader.getChannel(6);  // Channel 7 for Motor 1
@@ -1362,6 +1409,6 @@ void loop() {
         lastStatsLog = millis();
     }
     
-    // Small delay to prevent tight looping
-    delay(10);
+    // Small delay to prevent tight looping (reduced from 10ms since RC is interrupt-driven)
+    delay(5);
 } 

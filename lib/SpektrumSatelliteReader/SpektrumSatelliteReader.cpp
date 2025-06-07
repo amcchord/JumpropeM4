@@ -1,5 +1,8 @@
 #include "SpektrumSatelliteReader.h"
 
+// Static instance for interrupt callback
+SpektrumSatelliteReader* SpektrumSatelliteReader::_instance = nullptr;
+
 SpektrumSatelliteReader::SpektrumSatelliteReader(HardwareSerial& serial, int numChannels, int minValue, int maxValue, int defaultValue)
     : _serial(serial), _numChannels(numChannels), _minValue(minValue), _maxValue(maxValue), _defaultValue(defaultValue) {
     
@@ -19,6 +22,7 @@ SpektrumSatelliteReader::SpektrumSatelliteReader(HardwareSerial& serial, int num
     _cs10 = 0;
     _cs11 = 0;
     _formatSamples = 0;
+    _interruptMode = false;
     
     // Initialize frame statistics
     _frameStats.totalFrames = 0;
@@ -30,6 +34,9 @@ SpektrumSatelliteReader::SpektrumSatelliteReader(HardwareSerial& serial, int num
 }
 
 SpektrumSatelliteReader::~SpektrumSatelliteReader() {
+    if (_interruptMode) {
+        endInterruptMode();
+    }
     delete[] _channelValues;
 }
 
@@ -66,6 +73,81 @@ bool SpektrumSatelliteReader::beginBindMode() {
     return true;
 }
 
+bool SpektrumSatelliteReader::beginInterruptMode(int timerFrequencyHz) {
+    if (_interruptMode) {
+        return true; // Already in interrupt mode
+    }
+    
+    // Set the static instance for interrupt callback
+    _instance = this;
+    
+    #ifdef ARDUINO_SAMD_VARIANT
+    // SAMD51 Timer setup for interrupt processing
+    // Use TC3 (Timer/Counter 3) for RC input processing
+    
+    // Enable GCLK for TC3
+    GCLK->PCHCTRL[TC3_GCLK_ID].reg = GCLK_PCHCTRL_GEN_GCLK0_Val | (1 << GCLK_PCHCTRL_CHEN_Pos);
+    while (GCLK->SYNCBUSY.reg > 0);
+    
+    // Enable TC3 in PM
+    MCLK->APBCMASK.reg |= MCLK_APBCMASK_TC3;
+    
+    // Reset TC3
+    TC3->COUNT16.CTRLA.bit.SWRST = 1;
+    while (TC3->COUNT16.SYNCBUSY.bit.SWRST);
+    
+    // Configure TC3 for 16-bit mode with prescaler
+    TC3->COUNT16.CTRLA.reg = TC_CTRLA_MODE_COUNT16 | TC_CTRLA_PRESCALER_DIV64;
+    
+    // Calculate compare value for desired frequency
+    // GCLK0 is typically 120MHz, with DIV64 prescaler = 1.875MHz
+    // For 500Hz: 1875000 / 500 = 3750
+    uint16_t compareValue = (1875000 / timerFrequencyHz) - 1;
+    TC3->COUNT16.CC[0].reg = compareValue;
+    while (TC3->COUNT16.SYNCBUSY.bit.CC0);
+    
+    // Enable compare match interrupt
+    TC3->COUNT16.INTENSET.bit.MC0 = 1;
+    
+    // Enable TC3 interrupt in NVIC
+    NVIC_EnableIRQ(TC3_IRQn);
+    NVIC_SetPriority(TC3_IRQn, 1); // High priority for RC processing
+    
+    // Enable TC3
+    TC3->COUNT16.CTRLA.bit.ENABLE = 1;
+    while (TC3->COUNT16.SYNCBUSY.bit.ENABLE);
+    
+    _interruptMode = true;
+    return true;
+    
+    #else
+    // Non-SAMD platform - fall back to polling mode
+    return false;
+    #endif
+}
+
+void SpektrumSatelliteReader::endInterruptMode() {
+    if (!_interruptMode) {
+        return;
+    }
+    
+    #ifdef ARDUINO_SAMD_VARIANT
+    // Disable TC3 interrupt
+    NVIC_DisableIRQ(TC3_IRQn);
+    
+    // Disable TC3
+    TC3->COUNT16.CTRLA.bit.ENABLE = 0;
+    while (TC3->COUNT16.SYNCBUSY.bit.ENABLE);
+    
+    // Reset TC3
+    TC3->COUNT16.CTRLA.bit.SWRST = 1;
+    while (TC3->COUNT16.SYNCBUSY.bit.SWRST);
+    #endif
+    
+    _interruptMode = false;
+    _instance = nullptr;
+}
+
 int SpektrumSatelliteReader::getChannel(int channel) const {
     if (channel < 0 || channel >= _numChannels) {
         return _defaultValue;
@@ -87,23 +169,69 @@ float SpektrumSatelliteReader::mapToRange(int channelValue, float minOutput, flo
 }
 
 bool SpektrumSatelliteReader::update() {
+    if (_interruptMode) {
+        // In interrupt mode, just check signal status
+        uint32_t now = millis();
+        if (now - _lastFrameTime > SIGNAL_TIMEOUT_MS) {
+            _receivingSignal = false;
+        }
+        return isReceiving();
+    } else {
+        // Original polling implementation
+        uint32_t now = millis();
+        
+        // Process all available bytes
+        while (_serial.available()) {
+            uint8_t b = _serial.read();
+            if (processByte(now, b)) {
+                _receivingSignal = true;
+                _lastFrameTime = now;
+            }
+        }
+        
+        // Check for signal timeout
+        if (now - _lastFrameTime > SIGNAL_TIMEOUT_MS) {
+            _receivingSignal = false;
+        }
+        
+        return isReceiving();
+    }
+}
+
+void SpektrumSatelliteReader::updateFromInterrupt() {
+    // This method is called from timer interrupt
+    // Keep it minimal and fast
     uint32_t now = millis();
     
-    // Process all available bytes
-    while (_serial.available()) {
+    // Process available bytes (limit to prevent long interrupt time)
+    int bytesProcessed = 0;
+    const int maxBytesPerInterrupt = 8; // Limit processing time
+    
+    while (_serial.available() && bytesProcessed < maxBytesPerInterrupt) {
         uint8_t b = _serial.read();
         if (processByte(now, b)) {
             _receivingSignal = true;
             _lastFrameTime = now;
         }
+        bytesProcessed++;
     }
     
     // Check for signal timeout
     if (now - _lastFrameTime > SIGNAL_TIMEOUT_MS) {
         _receivingSignal = false;
     }
+}
+
+// Static interrupt handler for SAMD51 TC3
+void SpektrumSatelliteReader::timerInterruptHandler() {
+    if (_instance != nullptr) {
+        _instance->updateFromInterrupt();
+    }
     
-    return isReceiving();
+    #ifdef ARDUINO_SAMD_VARIANT
+    // Clear interrupt flag
+    TC3->COUNT16.INTFLAG.bit.MC0 = 1;
+    #endif
 }
 
 bool SpektrumSatelliteReader::processByte(uint32_t frameTimeMs, uint8_t b) {
@@ -319,17 +447,17 @@ SpektrumSatelliteReader::SwitchStates SpektrumSatelliteReader::getSwitchStatesFr
         states.switchA = false;
         states.switchB = false;
     }
-    else if (ch6Value >= 1559 && ch6Value <= 1639) {
-        // A=ON, B=OFF: 1599
-        states.switchA = true;
-        states.switchB = false;
-    }
-    else if (ch6Value >= 1360 && ch6Value <= 1440) {
+    else if (ch6Value >= 1350 && ch6Value <= 1450) {
         // A=OFF, B=ON: 1400
         states.switchA = false;
         states.switchB = true;
     }
-    else if (ch6Value >= 1760 && ch6Value <= 1840) {
+    else if (ch6Value >= 1550 && ch6Value <= 1650) {
+        // A=ON, B=OFF: 1599
+        states.switchA = true;
+        states.switchB = false;
+    }
+    else if (ch6Value >= 1750 && ch6Value <= 1850) {
         // A=ON, B=ON: 1800
         states.switchA = true;
         states.switchB = true;
@@ -354,4 +482,11 @@ SpektrumSatelliteReader::Channel8State SpektrumSatelliteReader::getChannel8State
     }
     
     return CH8_UNKNOWN;
-} 
+}
+
+#ifdef ARDUINO_SAMD_VARIANT
+// TC3 Interrupt Service Routine for SAMD51
+extern "C" void TC3_Handler() {
+    SpektrumSatelliteReader::timerInterruptHandler();
+}
+#endif 
